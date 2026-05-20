@@ -24,7 +24,9 @@ AI 代码助手，Go 实现的终端应用，对接任何 OpenAI Chat Completion
 ```bash
 # macOS / Linux
 curl -fsSL https://raw.githubusercontent.com/itmisx/deepx/main/scripts/install.sh | bash
+```
 
+```bash
 # Windows (PowerShell)
 irm https://raw.githubusercontent.com/itmisx/deepx/main/scripts/install.ps1 | iex
 ```
