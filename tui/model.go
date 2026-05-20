@@ -108,8 +108,8 @@ type model struct {
 	// width 没变就复用同一个 renderer,避免每帧重建。
 	mdRenderer      *glamour.TermRenderer
 	mdRendererWidth int
-	mdCache      string // 上次渲染的 markdown 输出
-	mdCacheLen   int    // 上次渲染时的 chatContent 长度
+	mdCache         string // 上次渲染的 markdown 输出
+	mdCacheLen      int    // 上次渲染时的 chatContent 长度
 
 	// session 是当前 workspace 的持久化句柄。启动时建/打开 ~/.deepx/sessions/{sid}/,
 	// 写时机:user enter 后 + assistant 流结束(StreamDoneMsg)时各 append 一行。
@@ -124,11 +124,11 @@ type model struct {
 	skillCatalog string
 
 	// review 模式审核状态
-	reviewPending   bool
-	reviewCh        chan bool
-	reviewToolName  string
-	reviewToolArgs  string
-	reviewYesNo     bool // true=YES, false=NO
+	reviewPending  bool
+	reviewCh       chan bool
+	reviewToolName string
+	reviewToolArgs string
+	reviewYesNo    bool // true=YES, false=NO
 
 	// 右栏仪表盘字段
 	workspace       string        // os.Getwd() at startup,展示当前工作目录
@@ -143,10 +143,10 @@ type reviewResultMsg struct{}
 
 // compressionResultMsg 会话压缩完成后的结果,由异步 tea.Cmd 发回 Update。
 type compressionResultMsg struct {
-	summary        string
-	cutIdx         int    // 从 snapshot 算出的截断位置
-	compressedTurns int   // 本次压缩的 user 轮数
-	err            error
+	summary         string
+	cutIdx          int // 从 snapshot 算出的截断位置
+	compressedTurns int // 本次压缩的 user 轮数
+	err             error
 }
 
 func initialModel(models agent.ModelConfig, needsSetup bool) model {
@@ -236,7 +236,7 @@ func initialModel(models agent.ModelConfig, needsSetup bool) model {
 				role := "deepx"
 				if e.Role == "user" {
 					role = "You"
-	
+
 				}
 				m.chatContent.WriteString(rolePrefix(role) + e.Content + "\n\n")
 			}
@@ -256,7 +256,7 @@ func initialModel(models agent.ModelConfig, needsSetup bool) model {
 				role := "deepx"
 				if e.Role == "user" {
 					role = "You"
-	
+
 				}
 				m.chatContent.WriteString(rolePrefix(role) + e.Content + "\n\n")
 			}
@@ -864,14 +864,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// 拷贝当前 history 快照,异步执行压缩
 			snapshot := make([]agent.ChatMessage, len(m.history))
 			copy(snapshot, m.history)
-				pro := m.models.Pro
+			pro := m.models.Pro
 			return m, func() tea.Msg {
 				summary, cutIdx, compressedTurns, err := runCompression(snapshot, pro)
 				return compressionResultMsg{
-					summary:        summary,
-					cutIdx:         cutIdx,
+					summary:         summary,
+					cutIdx:          cutIdx,
 					compressedTurns: compressedTurns,
-					err:            err,
+					err:             err,
 				}
 			}
 		}
@@ -1155,11 +1155,11 @@ func modeNotification(mode agent.AgentMode, modelRole string) string {
 	}
 	switch mode {
 	case agent.AgentMode_Plan:
-		return "[系统通知] 当前模式: plan" + modelPart + "。Write / Update / Bash 已被禁用,只允许只读操作。"
+		return "当前模式: plan" + modelPart
 	case agent.AgentMode_Review:
-		return "[系统通知] 当前模式: review" + modelPart + "。Write / Update / Bash 需要人工审核确认后才执行,其余工具自动执行。"
+		return "当前模式: review" + modelPart
 	default:
-		return "[系统通知] 当前模式: auto" + modelPart + "。所有工具可用。"
+		return "当前模式: auto" + modelPart
 	}
 }
 
@@ -1204,7 +1204,7 @@ func (m *model) handleSlashCommand(input string) {
 			"- `/plan` — 切到只读模式(仅 Read / List / Grep / Glob / Tree / Search / Fetch / Memory)\n"+
 			"- `/auto` — 切回全工具模式(默认)\n"+
 			"- `/review` — 切到审核模式(Write/Update/Bash 需人工确认)\n"+
-				"- `/mode` — 显示当前模式\n"+
+			"- `/mode` — 显示当前模式\n"+
 			"- `/config` — 重新配置 API key (覆盖 `~/.deepx/model.yaml`)\n"+
 			"- `/skills` — 列出可用 skill\n"+
 			"- `/help` — 帮助\n\n"+
