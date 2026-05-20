@@ -3,8 +3,10 @@ package agent
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"deepx/tools"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -173,7 +175,7 @@ type chatResponse struct {
 
 // CallOnce 发起一次非流式 chat completion 调用,直接返回 content 文本。
 // 不带 tools 参数,适用于摘要生成等一次性文本生成场景。
-func CallOnce(apiKey, baseURL, modelID string, convo []ChatMessage, maxTokens int) (string, error) {
+func CallOnce(ctx context.Context, apiKey, baseURL, modelID string, convo []ChatMessage, maxTokens int) (string, error) {
 	body, err := json.Marshal(chatRequest{
 		Model:     modelID,
 		MaxTokens: maxTokens,
@@ -184,7 +186,7 @@ func CallOnce(apiKey, baseURL, modelID string, convo []ChatMessage, maxTokens in
 		return "", err
 	}
 
-	req, err := http.NewRequest("POST", baseURL+"/chat/completions", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, "POST", baseURL+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
 		return "", err
 	}
@@ -270,6 +272,7 @@ func BuildSystemPrompt(workspace, skillCatalog string) string {
 }
 
 func StartStream(
+	ctx context.Context,
 	models ModelConfig,
 	history []ChatMessage,
 	maxTokens int,
@@ -326,14 +329,23 @@ func StartStream(
 		// 100 轮上限给复杂多步任务留足空间(read → analyze → edit → test → fix 这种循环)。
 		// 触顶通常说明 LLM 在死循环或反复试错,需要返回错误让用户介入。
 		for round := 0; round < mainAgentMaxRounds; round++ {
+			// 检查 context 是否取消(ESC/退出),提前退出不卡后台
+			if ctx.Err() != nil {
+				return
+			}
 			// 不再主动 strip reasoning_content:本轮不切换模型,thinking 模型仍按需回传,
 			// 非 thinking 模型对 history 里的字段视而不见。若个别模型报错,
 			// streamOnce 仍有 errReasoningRequired retry 兜底。
 			assistantContent, reasoning, toolCalls, err := streamOnce(
+				ctx,
 				currentEntry.APIKey, currentEntry.BaseURL, currentEntry.Model,
 				convo, maxTokens, toolSpecs, ch,
 			)
 			if err != nil {
+				// context 取消是主动中断,不报 Error 给 UI。
+				if errors.Is(err, context.Canceled) {
+					return
+				}
 				ch <- StreamErrMsg{err}
 				return
 			}
@@ -388,7 +400,7 @@ func StartStream(
 						// 2. 拍平成 DAG 节点并同步执行
 						nodes := flattenPlans(plans)
 						exec := func(n *schedulerNode, preds map[string]string) (string, error) {
-							res := runSubAgent(subAgentInput{
+							res := runSubAgent(ctx, subAgentInput{
 								Models:       models,
 								Entry:        resolveModelEntry(n.Model, models),
 								NodeID:       n.ID,
@@ -404,7 +416,7 @@ func StartStream(
 							}
 							return res.Summary, nil
 						}
-						final := runDAG(nodes, exec, ch)
+						final := runDAG(ctx, nodes, exec, ch)
 						// 3. 拼汇总 ToolResult 给 pro,让它写最终给用户的总结
 						var summary strings.Builder
 						summary.WriteString(fmt.Sprintf("已执行完毕,共 %d 个节点。\n", len(final)))
@@ -490,6 +502,7 @@ func StartStream(
 
 // streamOnce 发起一次 chat/completions 请求,返回 (content, reasoning_content, tool_calls)。
 func streamOnce(
+	ctx context.Context,
 	apiKey, baseURL, modelID string,
 	convo []ChatMessage,
 	maxTokens int,
@@ -508,7 +521,7 @@ func streamOnce(
 		return "", "", nil, err
 	}
 
-	req, err := http.NewRequest("POST", baseURL+"/chat/completions", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, "POST", baseURL+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
 		return "", "", nil, err
 	}

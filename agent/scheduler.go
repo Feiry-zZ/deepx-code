@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"sync"
 
 	tea "charm.land/bubbletea/v2"
@@ -45,9 +46,10 @@ func flattenPlans(plans []PlanItem) []schedulerNode {
 // 上游 Failed/Blocked 时,下游标 Blocked 跳过 (失败传播)。
 // 检测到循环依赖或孤儿依赖 → 把残留 pending 全标 Blocked 后退出。
 //
+// ctx 取消时,已启动的节点仍继续(子 agent 自己检测 ctx),等待中的节点标 Blocked。
 // statusCh 非 nil 时,状态变化通过 TaskStatusMsg 同步给 UI。
 // 返回的 nodes 含最终 Status 与 Summary。
-func runDAG(nodes []schedulerNode, exec executeFunc, statusCh chan<- tea.Msg) []schedulerNode {
+func runDAG(ctx context.Context, nodes []schedulerNode, exec executeFunc, statusCh chan<- tea.Msg) []schedulerNode {
 	if len(nodes) == 0 {
 		return nodes
 	}
@@ -94,6 +96,20 @@ func runDAG(nodes []schedulerNode, exec executeFunc, statusCh chan<- tea.Msg) []
 
 	// scheduler 主循环 (单线程驱动,只有它能往 launch goroutine 派工作)
 	for {
+		// context 取消时,全部 pending 标 Blocked 退出
+		if ctx.Err() != nil {
+			mu.Lock()
+			for i := range nodes {
+				n := &nodes[i]
+				if n.Status == PlanStatusPending {
+					n.Status = PlanStatusBlocked
+					n.Summary = "已取消"
+				}
+			}
+			mu.Unlock()
+			break
+		}
+
 		// 一轮 ready/block 评估,在锁内完成所有状态变更与 preds 快照
 		mu.Lock()
 		var toLaunch []*schedulerNode

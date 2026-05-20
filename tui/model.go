@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"deepx/agent"
 	"deepx/session"
 	"deepx/skill"
@@ -136,6 +137,9 @@ type model struct {
 	turnElapsed     time.Duration // 上一轮总耗时,streaming=false 时显示这个
 	turnInputChars  int           // 本轮 user 发送时的 history 总字符数(快照)
 	turnOutputChars int           // 本轮 assistant content 累计字符数(只算 content,跳过 reasoning)
+
+	// cancelAgent 取消后台 agent 的 context。ESC 中断时调用,真正终止 HTTP 请求和工具调用。
+	cancelAgent context.CancelFunc
 }
 
 // reviewResultMsg 审核完成后从 goroutine 发回,恢复流监听。
@@ -156,7 +160,7 @@ func initialModel(models agent.ModelConfig, needsSetup bool) model {
 	sp.Spinner = spinner.MiniDot
 
 	ti := textinput.New()
-	ti.Placeholder = "Type a message... (Enter to send, Ctrl+Shift+A to select all, Ctrl+C to cancel/quit)"
+	ti.Placeholder = "Type a message... (Enter to send, Esc to interrupt)"
 	ti.CharLimit = 4000
 
 	si := textinput.New()
@@ -641,22 +645,35 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case "ctrl+c":
+			// Ctrl+C 退出程序。若正在流式,先取消后台任务。
 			if m.streaming {
-				// 流式中 Ctrl+C = "中断当前任务",不退出程序。
-				// 把 streamCh 交给 drainAndDiscard,后台 goroutine 自己跑完;
-				// UI 立刻回到 idle,用户能继续操作或第二次 Ctrl+C 退出。
+				if m.cancelAgent != nil {
+					m.cancelAgent()
+					m.cancelAgent = nil
+				}
 				if m.streamCh != nil {
 					drainAndDiscard(m.streamCh)
-					m.streamCh = nil
 				}
+			}
+			return m, tea.Quit
+		case "esc":
+			// Esc 中断当前对话。取消 context 真正终止后台 HTTP 请求和工具调用,
+			// 然后 drain channel 防止 goroutine 阻塞。
+			if m.streaming && m.streamCh != nil {
+				if m.cancelAgent != nil {
+					m.cancelAgent()
+					m.cancelAgent = nil
+				}
+				drainAndDiscard(m.streamCh)
+				m.streamCh = nil
 				m.streaming = false
 				m.thinking = false
 				m.status = "idle"
-				m.chatContent.WriteString("\n[deepx] 已中断 (后台任务会继续到完成或超时)\n\n")
+				m.chatContent.WriteString("\n\n_已中断_\n\n")
 				m.refreshViewport()
 				return m, nil
 			}
-			return m, tea.Quit
+			return m, nil
 		case "up", "down", "pgup", "pgdown", "pageup", "pagedown", "home", "end", "ctrl+u", "ctrl+d":
 			var c tea.Cmd
 			m.chatViewport, c = m.chatViewport.Update(msg)
@@ -729,7 +746,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.plan = nil
 
 			workspace, _ := os.Getwd()
+			ctx, cancel := context.WithCancel(context.Background())
+			m.cancelAgent = cancel
 			cmd, ch := agent.StartStream(
+				ctx,
 				m.models,
 				m.history, maxTokens,
 				m.mode,
@@ -742,6 +762,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case agent.ReasoningTokenMsg:
+		// streamCh 已 nil 说明 ESC/Ctrl+C 中断过了,丢弃残留消息
+		if m.streamCh == nil {
+			return m, nil
+		}
 		// 模型在思考。文字不进 chat,只确保 spinner 在转。
 		m.status = "thinking"
 		if !m.thinking {
@@ -751,6 +775,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(append(cmds, agent.ListenToStream(m.streamCh))...)
 
 	case agent.TokenMsg:
+		if m.streamCh == nil {
+			return m, nil
+		}
 		// 助手正式回复开始,停止 spinner,把文本写进 chat
 		m.status = "streaming"
 		m.thinking = false
@@ -763,6 +790,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, agent.ListenToStream(m.streamCh)
 
 	case agent.ToolCallStartMsg:
+		if m.streamCh == nil {
+			return m, nil
+		}
 		// 工具调用 = 一次"动作",紧凑单行展示:<icon> Name (主参数)
 		m.status = "tool"
 		line := formatToolCallLine(msg.Name, msg.Args)
@@ -796,6 +826,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(append(cmds, agent.ListenToStream(m.streamCh))...)
 
 	case agent.ToolCallResultMsg:
+		if m.streamCh == nil {
+			return m, nil
+		}
 		// 结果不再原样打印长输出。失败时短提示一行;成功默默吞掉(LLM 会用结果接着干)。
 		// 这样多轮工具调用看到的就是清爽的工具列表,不被几百行输出淹没。
 		if !msg.Success {
@@ -826,6 +859,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 
 	case agent.HistoryUpdateMsg:
+		if m.streamCh == nil {
+			return m, nil
+		}
 		m.history = msg.History
 		// 持久化完整 history(含 tool_calls / tool results)到 binary gob 文件,
 		// 重启时可直接反序列化恢复,无需重建。
@@ -835,6 +871,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, agent.ListenToStream(m.streamCh)
 
 	case agent.ModelSwitchMsg:
+		if m.streamCh == nil {
+			return m, nil
+		}
 		m.activeModelRole = msg.Role
 		m.activeModelID = msg.ModelID
 		if msg.Reason != "" {
@@ -845,6 +884,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, agent.ListenToStream(m.streamCh)
 
 	case agent.PlanCreatedMsg:
+		if m.streamCh == nil {
+			return m, nil
+		}
 		m.plan = &planState{items: msg.Plans}
 		// 不写 chatContent — plan 通过 refreshViewport 的 live overlay 实时渲染,
 		// 每次 TaskStatusMsg 自然刷新出新 checkbox。
@@ -853,6 +895,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, agent.ListenToStream(m.streamCh)
 
 	case agent.TaskStatusMsg:
+		if m.streamCh == nil {
+			return m, nil
+		}
 		// 只有 plan 已就位才有意义;否则可能是模型乱调,丢弃
 		if m.plan != nil {
 			m.plan.apply(msg)
@@ -861,6 +906,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, agent.ListenToStream(m.streamCh)
 
 	case agent.StreamDoneMsg:
+		if m.streamCh == nil {
+			return m, nil
+		}
 		// 流结束时把当前 plan 最终状态固化进 chatContent,这样滚回历史还能看到。
 		// 在写 "\n\n" 之前固化,plan 留在本轮回复结尾。
 		if m.plan != nil {
@@ -879,6 +927,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.streaming = false
 		m.thinking = false
 		m.streamCh = nil
+		m.cancelAgent = nil
 		m.turnElapsed = time.Since(m.turnStartedAt)
 		m.refreshViewport()
 
@@ -909,11 +958,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case agent.StreamErrMsg:
+		if m.streamCh == nil {
+			return m, nil
+		}
 		m.chatContent.WriteString("\n[Error: " + msg.Err.Error() + "]\n\n")
 		m.status = "error"
 		m.streaming = false
 		m.thinking = false
 		m.streamCh = nil
+		m.cancelAgent = nil
 		m.turnElapsed = time.Since(m.turnStartedAt)
 		m.refreshViewport()
 		return m, nil
@@ -1053,7 +1106,7 @@ func runCompression(history []agent.ChatMessage, pro agent.ModelEntry) (
 		{Role: "user", Content: inputBuf.String()},
 	}
 
-	summary, err = agent.CallOnce(pro.APIKey, pro.BaseURL, pro.Model, convo, 2048)
+	summary, err = agent.CallOnce(context.Background(), pro.APIKey, pro.BaseURL, pro.Model, convo, 2048)
 	if err != nil {
 		return "", 0, 0, err
 	}
@@ -1281,7 +1334,8 @@ func (m *model) handleSlashCommand(input string) {
 			"- `Enter` — 发送\n"+
 			"- `Ctrl+Shift+A` / macOS `Cmd+Shift+A` — 输入框全选\n"+
 			"- `Ctrl+V` — 粘贴(含图片)\n"+
-			"- `Ctrl+C` — 流式中中断当前回合;空闲时退出")
+			"- `Esc` — 中断当前对话\n"+
+			"- `Ctrl+C` — 退出程序")
 	default:
 		m.appendChat("assistant", fmt.Sprintf("未知命令: %s (输入 /help 查看)", cmd))
 	}

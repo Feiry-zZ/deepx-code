@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"sync/atomic"
@@ -44,7 +45,7 @@ func TestRunDAG_SequentialOrdering(t *testing.T) {
 		return "ok-" + n.ID, nil
 	}
 
-	runDAG(nodes, exec, nil)
+	runDAG(context.Background(), nodes, exec, nil)
 
 	if len(order) != 3 || order[0] != "p1" || order[1] != "p2" || order[2] != "p3" {
 		t.Fatalf("expected sequential [p1 p2 p3], got %v", order)
@@ -67,7 +68,7 @@ func TestRunDAG_ParallelInitialReady(t *testing.T) {
 
 	finished := make(chan []schedulerNode, 1)
 	go func() {
-		finished <- runDAG(nodes, exec, nil)
+		finished <- runDAG(context.Background(), nodes, exec, nil)
 	}()
 
 	deadline := time.After(500 * time.Millisecond)
@@ -97,7 +98,7 @@ func TestRunDAG_FailurePropagatesBlock(t *testing.T) {
 		}
 		return "ok-" + n.ID, nil
 	}
-	final := runDAG(nodes, exec, nil)
+	final := runDAG(context.Background(), nodes, exec, nil)
 
 	st := map[string]PlanStatus{}
 	for _, n := range final {
@@ -126,7 +127,7 @@ func TestRunDAG_CycleDeadlockMarkedBlocked(t *testing.T) {
 		return "ok", nil
 	}
 
-	final := runDAG(nodes, exec, nil)
+	final := runDAG(context.Background(), nodes, exec, nil)
 
 	if c := atomic.LoadInt32(&calls); c != 0 {
 		t.Errorf("exec should never be called for cyclic deps, got %d calls", c)
@@ -151,7 +152,7 @@ func TestRunDAG_PredecessorSummariesPassed(t *testing.T) {
 		}
 		return "summary-of-" + n.ID, nil
 	}
-	runDAG(nodes, exec, nil)
+	runDAG(context.Background(), nodes, exec, nil)
 
 	if seenPredForP2 != "summary-of-p1" {
 		t.Errorf("p2 should see p1's summary, got %q", seenPredForP2)

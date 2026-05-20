@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"deepx/tools"
 	"fmt"
 	"strings"
@@ -72,7 +73,7 @@ const subAgentMaxRounds = 50
 //   - UpdatePlanStatus 调用被吞掉,scheduler 才是状态真实来源
 //   - 不向 TUI 发 TokenMsg / ToolCallStartMsg 等可见事件,子 agent 中间过程完全隐藏
 //   - 最终 assistant content 作为 Summary 返回;失败 → Err
-func runSubAgent(in subAgentInput) subAgentResult {
+func runSubAgent(ctx context.Context, in subAgentInput) subAgentResult {
 	// 构造系统提示。子 agent 看到的上下文就这几行,简短紧凑。
 	var sb strings.Builder
 	sb.WriteString("你是 deepx 中的子 agent,只负责完成一个被分派的 plan 项,不要再 SwitchModel、也不要 CreatePlan。\n")
@@ -110,9 +111,16 @@ func runSubAgent(in subAgentInput) subAgentResult {
 	}()
 
 	for round := 0; round < subAgentMaxRounds; round++ {
+		// 检查 context 是否取消(ESC/退出)
+		if ctx.Err() != nil {
+			close(silent)
+			<-drained
+			return subAgentResult{Err: ctx.Err()}
+		}
 		// 不主动 strip reasoning:本轮锁定模型,thinking 模型仍正常回传,
 		// 非 thinking 模型忽略 history 里的 reasoning_content 字段(omitempty 已处理空值)。
 		content, reasoning, toolCalls, err := streamOnce(
+			ctx,
 			in.Entry.APIKey, in.Entry.BaseURL, in.Entry.Model,
 			convo, in.MaxTokens, toolSpecs, silent,
 		)
