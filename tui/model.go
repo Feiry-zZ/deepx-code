@@ -30,7 +30,7 @@ type model struct {
 	height int
 
 	chatViewport viewport.Model
-	chatContent  *strings.Builder
+	chatContent  *chatLog
 
 	input textinput.Model
 
@@ -103,11 +103,6 @@ type model struct {
 
 	// scrollbarDragging: 左键在滚动条列按下且未松开。该状态下 motion 事件 → SetYOffset。
 	scrollbarDragging bool
-
-	// markdown 实时渲染缓存:内容不变且宽度不变时复用,避免每帧重渲。
-	mdCache      string
-	mdCacheLen   int
-	mdCacheWidth int
 
 	// session 是当前 workspace 的持久化句柄。启动时建/打开 ~/.deepx/sessions/{sid}/,
 	// 写时机:user enter 后 + assistant 流结束(StreamDoneMsg)时各 append 一行。
@@ -200,7 +195,7 @@ func initialModel(models agent.ModelConfig, needsSetup bool) model {
 	skillCatalog := buildSkillCatalog(loader)
 
 	m := model{
-		chatContent:     &strings.Builder{},
+		chatContent:     newChatLog(maxChatBytes),
 		currentReply:    &strings.Builder{},
 		chatViewport:    vp,
 		input:           ti,
@@ -230,8 +225,9 @@ func initialModel(models agent.ModelConfig, needsSetup bool) model {
 				gobHistory[0].Content = agent.BuildSystemPrompt(m.workspace, m.skillCatalog)
 			}
 			m.history = gobHistory
-			m.chatContent.WriteString(rebuildChatFromHistory(gobHistory))
-			m.chatContent.WriteString("---\n_(已恢复完整会话)_\n\n")
+			rebuildChatFromHistory(m.chatContent, gobHistory)
+			// 提示行独立成段 —— chatLog 预算紧张时优先丢更旧的内容,这条标签反正是装饰。
+			m.chatContent.Open("---\n_(已恢复完整会话)_\n\n")
 			// 如果有会话压缩摘要,更新显示用 totalTurns
 			if len(gobHistory) > 0 && gobHistory[0].Role == "assistant" &&
 				strings.HasPrefix(gobHistory[0].Content, "## 会话摘要") {
@@ -248,7 +244,7 @@ func initialModel(models agent.ModelConfig, needsSetup bool) model {
 				// 摘要作为第一条 assistant 消息
 				summaryMsg := "## 会话摘要\n" + summary
 				m.history = append(m.history, agent.ChatMessage{Role: "assistant", Content: summaryMsg})
-				m.chatContent.WriteString(rolePrefix("assistant") + summaryMsg + "\n\n---\n\n")
+				m.chatContent.Open(rolePrefix("assistant") + summaryMsg + "\n\n---\n\n")
 
 				for _, e := range entries {
 					m.history = append(m.history, agent.ChatMessage{
@@ -260,10 +256,10 @@ func initialModel(models agent.ModelConfig, needsSetup bool) model {
 						role = "You"
 
 					}
-					m.chatContent.WriteString(rolePrefix(role) + e.Content + "\n\n")
+					m.chatContent.Open(rolePrefix(role) + e.Content + "\n\n")
 				}
 				if len(entries) > 0 {
-					m.chatContent.WriteString("---\n_(以上为历史对话,共 " +
+					m.chatContent.Open("---\n_(以上为历史对话,共 " +
 						strconv.Itoa(len(entries)) + " 条)_\n\n")
 				}
 			} else {
@@ -280,10 +276,10 @@ func initialModel(models agent.ModelConfig, needsSetup bool) model {
 						role = "You"
 
 					}
-					m.chatContent.WriteString(rolePrefix(role) + e.Content + "\n\n")
+					m.chatContent.Open(rolePrefix(role) + e.Content + "\n\n")
 				}
 				if len(entries) > 0 {
-					m.chatContent.WriteString("---\n_(以上为历史对话,共 " +
+					m.chatContent.Open("---\n_(以上为历史对话,共 " +
 						strconv.Itoa(len(entries)) + " 条)_\n\n")
 				}
 			}
@@ -666,7 +662,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.streaming = false
 				m.thinking = false
 				m.status = "idle"
-				m.chatContent.WriteString("\n\n_已中断_\n\n")
+				m.chatContent.Append("\n\n_已中断_\n\n")
 				m.refreshViewport()
 				return m, nil
 			}
@@ -726,7 +722,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.turnInputChars = sumHistoryChars(m.history)
 			m.turnOutputChars = 0
 
-			m.chatContent.WriteString(deepxPrefix)
+			m.chatContent.Open(deepxPrefix)
 			m.refreshViewport()
 			// 启动 spinner ticking
 			cmds = append(cmds, m.spinner.Tick)
@@ -780,7 +776,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.thinking = false
 		text := string(msg)
 		m.currentReply.WriteString(text)
-		m.chatContent.WriteString(text)
+		m.chatContent.Append(text)
 		m.tokens += len([]rune(text))
 		m.turnOutputChars += len([]rune(text))
 		m.refreshViewport()
@@ -799,12 +795,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		//   - 已经以 \n 结尾(典型:上一次 tool 行写完):再补 1 个 → 凑成 \n\n 段落分隔
 		//   - 不以 \n 结尾(典型:首次工具调用紧跟 deepxPrefix,或 stream 完正文后再调工具):
 		//     补 2 个 → 强制段落分隔,避免被吸到上一行
-		existing := m.chatContent.String()
 		sep := "\n\n"
-		if strings.HasSuffix(existing, "\n") {
+		if m.chatContent.EndsWithNewline() {
 			sep = "\n"
 		}
-		m.chatContent.WriteString(sep + line + "\n")
+		m.chatContent.Append(sep + line + "\n")
 		m.refreshViewport()
 		// review 模式:暂停流,等待用户确认
 		if msg.ReviewCh != nil {
@@ -833,7 +828,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if len(out) > 200 {
 				out = out[:200] + "…"
 			}
-			m.chatContent.WriteString("  ✗ " + msg.Name + " 失败: " + out + "\n")
+			m.chatContent.Append("  ✗ " + msg.Name + " 失败: " + out + "\n")
 		}
 		m.currentReply.Reset()
 		m.refreshViewport()
@@ -875,7 +870,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.activeModelID = msg.ModelID
 		if msg.Reason != "" {
 			// 升级类的切换在聊天流里留一行可见痕迹,便于用户察觉为什么变贵了
-			m.chatContent.WriteString(fmt.Sprintf("\n[已升级到 %s 模型] 原因: %s\n", msg.Role, msg.Reason))
+			m.chatContent.Append(fmt.Sprintf("\n[已升级到 %s 模型] 原因: %s\n", msg.Role, msg.Reason))
 			m.refreshViewport()
 		}
 		return m, agent.ListenToStream(m.streamCh)
@@ -909,9 +904,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// 流结束时把当前 plan 最终状态固化进 chatContent,这样滚回历史还能看到。
 		// 在写 "\n\n" 之前固化,plan 留在本轮回复结尾。
 		if m.plan != nil {
-			m.chatContent.WriteString("\n" + renderPlanForChat(m.plan))
+			m.chatContent.Append("\n" + renderPlanForChat(m.plan))
 		}
-		m.chatContent.WriteString("\n\n")
+		m.chatContent.Append("\n\n")
 		// 持久化助手最终回复。currentReply 在流式过程中累加,这里一次性落盘。
 		// 注意只存"主对话内容" —— tool_call / tool_result / reasoning 都不进 session 文件。
 		if m.session != nil {
@@ -928,8 +923,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.turnElapsed = time.Since(m.turnStartedAt)
 		m.refreshViewport()
 
-		// 显示窗口:仅保留最近 10 轮,超出直接裁剪
-		m.trimDisplayTurns()
+		// 显示区按字节预算自动裁剪 (chatLog.Append/Open 内部已调 trim),
+		// 这里无需额外动作 — 旧的 trimDisplayTurns 按"10 轮"裁的逻辑已被 chatLog 取代。
 
 		// 检查是否需要触发会话压缩：估算 token 数接近窗口的 70% 时触发。
 		ctxWin := m.models.Pro.ContextWindow
@@ -958,7 +953,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.streamCh == nil {
 			return m, nil
 		}
-		m.chatContent.WriteString("\n[Error: " + msg.Err.Error() + "]\n\n")
+		m.chatContent.Append("\n[Error: " + msg.Err.Error() + "]\n\n")
 		m.status = "error"
 		m.streaming = false
 		m.thinking = false
@@ -974,7 +969,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case compressionResultMsg:
 		if msg.err != nil {
-			m.chatContent.WriteString("\n[会话压缩失败: " + msg.err.Error() + "]\n\n")
+			m.chatContent.Append("\n[会话压缩失败: " + msg.err.Error() + "]\n\n")
 			m.refreshViewport()
 			return m, nil
 		}
@@ -993,7 +988,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			_ = m.session.SaveGob("history.gob", m.history)
 		}
 
-		m.chatContent.WriteString(fmt.Sprintf("\n---\n**已压缩会话历史（%d 轮→摘要）**\n\n", msg.compressedTurns))
+		m.chatContent.Open(fmt.Sprintf("\n---\n**已压缩会话历史（%d 轮→摘要）**\n\n", msg.compressedTurns))
 		m.refreshViewport()
 		return m, nil
 	}
@@ -1202,32 +1197,39 @@ func rolePrefix(role string) string {
 }
 
 func (m *model) appendChat(role, text string) {
-	m.chatContent.WriteString(rolePrefix(role) + text + "\n\n")
+	m.chatContent.Open(rolePrefix(role) + text + "\n\n")
 	m.refreshViewport()
 }
 
-// rebuildChatFromHistory 从完整 []ChatMessage 重建 chatContent 显示文本。
+// rebuildChatFromHistory 把完整 []ChatMessage 按"显示块"粒度写入 chatLog。
+//
+// **为什么不返回一个大字符串再 Open 一次**:chatLog.trim 是按 segment 粒度丢最旧段的,
+// 且 `len(segments) > 1` 才会触发裁剪。如果整个历史塞进单一 segment,首次新消息一旦
+// 新开 segment 就把整段历史(可能数百 KB)作为最旧段一次性丢掉 —— 用户体验就是
+// "重启看得到历史,发一条新消息历史全没了"。
+// 改成每条消息(及 assistant 的每个 tool_call、每条 tool result)一次 Open 后,
+// trim 能从最旧消息逐条丢,屏幕上保留尽可能多的近期上下文。
+//
 // 显示规则:
 //   - user: 非空 content 显示为用户消息
-//   - assistant: 非空 content 显示为助手回复;有 ToolCalls 时渲染工具调用行
+//   - assistant: 非空 content 显示为助手回复;有 ToolCalls 时每个调用各自渲染成一段
 //   - tool: 标记 ✓ 结果完成(不展示冗长的 tool result 原文)
 //   - system: 跳过
-func rebuildChatFromHistory(history []agent.ChatMessage) string {
-	var buf strings.Builder
+func rebuildChatFromHistory(cl *chatLog, history []agent.ChatMessage) {
 	for _, msg := range history {
 		switch msg.Role {
 		case "user":
 			if msg.Content != "" {
-				buf.WriteString(rolePrefix("You") + msg.Content + "\n\n")
+				cl.Open(rolePrefix("You") + msg.Content + "\n\n")
 			}
 		case "assistant":
 			if msg.Content != "" {
-				buf.WriteString(rolePrefix("deepx") + msg.Content + "\n\n")
+				cl.Open(rolePrefix("deepx") + msg.Content + "\n\n")
 			}
 			// 工具调用行:跟直播流 ToolCallStartMsg 相同的格式
 			for _, tc := range msg.ToolCalls {
 				line := formatToolCallLine(tc.Function.Name, tc.Function.Arguments)
-				buf.WriteString(line + "\n")
+				cl.Open(line + "\n")
 			}
 		case "tool":
 			// 工具结果只标记完成,不展示全量输出(跟直播流 ToolCallResultMsg 一致)
@@ -1235,38 +1237,9 @@ func rebuildChatFromHistory(history []agent.ChatMessage) string {
 			if !ok {
 				icon = defaultToolIcon
 			}
-			buf.WriteString("  " + icon + " ✓ " + msg.Name + "\n")
+			cl.Open("  " + icon + " ✓ " + msg.Name + "\n")
 		}
 	}
-	return buf.String()
-}
-
-// trimDisplayTurns 扫描 chatContent 中的 user 前缀计数,超过 10 轮则裁剪旧轮。
-func (m *model) trimDisplayTurns() {
-	const maxDisplayTurns = 10
-	content := m.chatContent.String()
-	idx := len(content)
-	count := 0
-	for count <= maxDisplayTurns {
-		prev := lastIndexBefore(content, userPrefix, idx)
-		if prev < 0 {
-			return
-		}
-		count++
-		idx = prev
-	}
-	m.chatContent.Reset()
-	m.chatContent.WriteString(content[idx:])
-	m.mdCacheLen = 0
-	m.refreshViewport()
-}
-
-// lastIndexBefore 返回 s[:end] 中 substr 最后出现的位置。
-func lastIndexBefore(s, substr string, end int) int {
-	if end > len(s) {
-		end = len(s)
-	}
-	return strings.LastIndex(s[:end], substr)
 }
 
 func modeNotification(mode agent.AgentMode, modelRole string) string {
@@ -1803,19 +1776,11 @@ func (m *model) refreshViewport() {
 	atBottom := m.chatViewport.AtBottom()
 	w := m.chatViewport.Width()
 
-	// 增量重渲:内容变化或宽度变化或首次渲染时重渲,否则复用缓存。
-	// resize 必须重渲 —— 分隔线宽度和 wrap 列数都依赖 w。
-	var content string
-	if m.chatContent.Len() != m.mdCacheLen || m.mdCacheWidth != w || m.mdCache == "" {
-		raw := ensureEmojiSpacing(m.chatContent.String())
-		rendered := m.renderMarkdown(raw, w)
-		m.mdCache = ensureEmojiSpacingANSI(rendered)
-		m.mdCacheLen = m.chatContent.Len()
-		m.mdCacheWidth = w
-		content = m.mdCache
-	} else {
-		content = m.mdCache
-	}
+	// 按 segment 渲染:每段独立缓存 ANSI,流式期间只有最后一段(被 Append 清过 ansi)
+	// 真正走重渲;前面段直接复用。resize 时所有段的 ansiWidth 不匹配,会整体重渲。
+	content := m.chatContent.Render(w, func(raw string, width int) string {
+		return ensureEmojiSpacingANSI(m.renderMarkdown(ensureEmojiSpacing(raw), width))
+	})
 
 	// plan / spinner 是 ANSI widget,叠加在 markdown 渲染之后。
 	if m.plan != nil && m.streaming {

@@ -30,6 +30,40 @@ over.`
 	}
 }
 
+// TestRebuildChatFromHistorySegments 回归:恢复路径必须按消息逐段 Open,
+// 而不是把全部历史塞进单段。否则首次新消息一开新段,整段历史会被 trim 当
+// 最旧段整体丢掉(用户现象:重启看得到历史,发一条新消息历史全没了)。
+func TestRebuildChatFromHistorySegments(t *testing.T) {
+	// 构造 3 条历史消息,小预算确保新增段时一定触发裁剪。
+	hist := []agent.ChatMessage{
+		{Role: "user", Content: strings.Repeat("a", 40)},
+		{Role: "assistant", Content: strings.Repeat("b", 40)},
+		{Role: "user", Content: strings.Repeat("c", 40)},
+	}
+
+	cl := newChatLog(200) // 3 段各 ~60B = ~180B 全装得下,够留余地
+	rebuildChatFromHistory(cl, hist)
+	if got := len(cl.segments); got != 3 {
+		t.Fatalf("restore segments = %d, want 3 (one Open per message)", got)
+	}
+
+	// 模拟用户发首条新消息 + deepx 起手 prefix —— 跟 model.go 入口路径一致。
+	cl.Open("**👤 You**: 新消息\n\n")
+	cl.Open("**🐋 deepx**: ")
+
+	// 核心断言:最旧的 user 消息(40 个 'a')可能被 trim 丢掉,
+	// 但**至少有一条**历史消息(40 个 'b' 或 'c')应当留下。
+	// 旧实现(单段)在这里整个历史会消失。
+	full := cl.String()
+	if !strings.Contains(full, strings.Repeat("b", 40)) &&
+		!strings.Contains(full, strings.Repeat("c", 40)) {
+		t.Errorf("all history was trimmed after first new turn — regression of single-segment restore bug.\nfull=%q", full)
+	}
+	if !strings.Contains(full, "新消息") {
+		t.Errorf("new user message missing from chat log:\n%q", full)
+	}
+}
+
 // TestRenderMarkdownDiffFence 验证 ~~~diff 块按 -/+/@@ 前缀分别上色,
 // 普通 ~~~ 块(无 infostring)仍然整体 dim,不应该出现红绿。
 func TestRenderMarkdownDiffFence(t *testing.T) {
@@ -82,7 +116,10 @@ func TestRenderMarkdownGobRestore(t *testing.T) {
 	if err := sess.LoadGob("history.gob", &hist); err != nil || len(hist) == 0 {
 		t.Skipf("no gob: %v", err)
 	}
-	raw := rebuildChatFromHistory(hist)
+	// rebuildChatFromHistory 现在按消息逐段 Open;给测试一个无裁剪预算,拿到全量 raw。
+	cl := newChatLog(0)
+	rebuildChatFromHistory(cl, hist)
+	raw := cl.String()
 
 	m := &model{}
 	rendered := m.renderMarkdown(raw, 170)
