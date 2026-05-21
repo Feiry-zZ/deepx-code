@@ -137,12 +137,12 @@ type model struct {
 
 	// 版本信息。version 是 build 时注入的当前版本号(go build 默认 "dev")。
 	// latestVersion 是异步检查得到的 GitHub latest release,空则没检查到 / 网络失败。
-	// updateAvailable 由 versionNewer(latestVersion, version) 算出,渲染时用来决定是否
+	// upgradeAvailable 由 versionNewer(latestVersion, version) 算出,渲染时用来决定是否
 	// 在右栏显示"有新版本"提示。
 	version         string
 	latestVersion   string
-	updateAvailable bool
-	updateURL       string
+	upgradeAvailable bool
+	upgradeURL       string
 
 	// 右栏仪表盘字段
 	workspace       string        // os.Getwd() at startup,展示当前工作目录
@@ -397,9 +397,9 @@ func cursorBlinkTick() tea.Cmd {
 
 func (m model) Init() tea.Cmd {
 	// textarea 的光标 blink 由 Focus() 返回,启动时一并发起。
-	// checkForUpdateCmd 异步打 GitHub Releases API,完成后通过 updateCheckResult 回送 Update。
+	// checkForUpgradeCmd 异步打 GitHub Releases API,完成后通过 upgradeCheckResult 回送 Update。
 	// cursorBlinkTick 自己驱动真实光标的明灭节奏。
-	return tea.Batch(textinput.Blink, m.input.Focus(), checkForUpdateCmd(), cursorBlinkTick())
+	return tea.Batch(textinput.Blink, m.input.Focus(), checkForUpgradeCmd(m.version), cursorBlinkTick())
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -883,20 +883,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(cmds...)
 		}
 
-	case updateCheckResult:
+	case upgradeCheckResult:
 		// 后台升级检查回执:有错就静默忽略,有结果就跟当前版本比一下。
 		// 有新版本时:右栏 banner 下方版本行常驻显示 ↑ 提示;chat 区追加一条 System 消息
 		// 给一次明显提醒(每次启动一次,不打扰)。
 		if msg.Err == nil && msg.LatestVersion != "" {
 			m.latestVersion = msg.LatestVersion
-			m.updateURL = msg.URL
-			m.updateAvailable = versionNewer(msg.LatestVersion, m.version)
-			if m.updateAvailable {
+			m.upgradeURL = msg.URL
+			m.upgradeAvailable = versionNewer(msg.LatestVersion, m.version)
+			if m.upgradeAvailable {
 				cur := m.version
 				if cur == "" {
 					cur = "dev"
 				}
-				m.appendChat("System", fmt.Sprintf(T("update.available"), cur, msg.LatestVersion, msg.URL))
+				m.appendChat("System", fmt.Sprintf(T("upgrade.available"), cur, msg.LatestVersion, msg.URL))
 			}
 		}
 		return m, nil

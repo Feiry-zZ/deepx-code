@@ -320,7 +320,7 @@ var translations = map[string]map[Lang]string{
 	},
 
 	// === 版本升级提醒 ===
-	"update.available": {
+	"upgrade.available": {
 		LangZH: "🎉 **新版本可用**: `v%s` → `v%s`\n升级: %s",
 		LangEN: "🎉 **New version available**: `v%s` → `v%s`\nUpgrade: %s",
 	},

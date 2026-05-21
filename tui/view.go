@@ -274,7 +274,7 @@ func (m model) versionLine(width int) string {
 	hi := lipgloss.NewStyle().Foreground(highlightColor).Bold(true).Render
 
 	left := dim("v" + cur)
-	if m.updateAvailable && m.latestVersion != "" {
+	if m.upgradeAvailable && m.latestVersion != "" {
 		left = left + " " + hi("↑ "+m.latestVersion)
 	}
 	// 居中 pad,跟 banner 同一对齐

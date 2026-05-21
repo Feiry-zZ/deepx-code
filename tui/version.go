@@ -17,20 +17,20 @@ import (
 // 版本相关常量。repo 写死指向上游,后续 fork 自己跑的话改这里。
 const (
 	githubRepoOwner = "itmisx"
-	githubRepoName  = "deepx"
-	updateCheckTTL  = 6 * time.Hour // 缓存 6 小时,避免频繁打 GitHub API
+	githubRepoName  = "deepx-code"
+	upgradeCheckTTL  = 6 * time.Hour // 缓存 6 小时,避免频繁打 GitHub API
 )
 
-// updateCheckResult 是版本检查结果,goroutine 完成后通过 tea.Msg 发回主模型。
-type updateCheckResult struct {
+// upgradeCheckResult 是版本检查结果,goroutine 完成后通过 tea.Msg 发回主模型。
+type upgradeCheckResult struct {
 	LatestVersion string // 最新发布的 tag(去掉 v 前缀,如 "0.2.0")
 	URL           string // release 页 URL,给"去查看"用
 	Err           error  // 网络 / API 失败时非 nil,model 视为"未知"忽略掉
 }
 
-// updateCheckCache 是落盘缓存,避免每次启动都打 GitHub API。
-// 走 ~/.deepx/update_check.json,可以读则不发请求,过期才重新探测。
-type updateCheckCache struct {
+// upgradeCheckCache 是落盘缓存,避免每次启动都打 GitHub API。
+// 走 ~/.deepx/upgrade_check.json,可以读则不发请求,过期才重新探测。
+type upgradeCheckCache struct {
 	CheckedAt     time.Time `json:"checked_at"`
 	LatestVersion string    `json:"latest_version"`
 	URL           string    `json:"url"`
@@ -41,10 +41,10 @@ func cachePath() string {
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(home, ".deepx", "update_check.json")
+	return filepath.Join(home, ".deepx", "upgrade_check.json")
 }
 
-func readUpdateCheckCache() (*updateCheckCache, bool) {
+func readUpgradeCheckCache() (*upgradeCheckCache, bool) {
 	p := cachePath()
 	if p == "" {
 		return nil, false
@@ -53,17 +53,17 @@ func readUpdateCheckCache() (*updateCheckCache, bool) {
 	if err != nil {
 		return nil, false
 	}
-	var c updateCheckCache
+	var c upgradeCheckCache
 	if err := json.Unmarshal(data, &c); err != nil {
 		return nil, false
 	}
-	if time.Since(c.CheckedAt) > updateCheckTTL {
+	if time.Since(c.CheckedAt) > upgradeCheckTTL {
 		return nil, false
 	}
 	return &c, true
 }
 
-func writeUpdateCheckCache(c updateCheckCache) {
+func writeUpgradeCheckCache(c upgradeCheckCache) {
 	p := cachePath()
 	if p == "" {
 		return
@@ -76,24 +76,31 @@ func writeUpdateCheckCache(c updateCheckCache) {
 	_ = os.WriteFile(p, data, 0o644)
 }
 
-// checkForUpdateCmd 返回一个 tea.Cmd 在后台异步检查新版本,完成后发 updateCheckResult。
+// checkForUpgradeCmd 返回一个 tea.Cmd 在后台异步检查新版本,完成后发 upgradeCheckResult。
 // 命中本地缓存时跳过网络请求直接返回缓存;失败(timeout / 4xx / 5xx)静默,不弹错误。
-func checkForUpdateCmd() tea.Cmd {
+//
+// 缓存的"latest" ≤ currentVersion 时强制忽略缓存重拉 —— 因为既然当前已经 ≥ 缓存里那个,
+// 这个缓存就给不了"是不是有更新版"的信息;不重拉的话发了新版用户重启也不会被提醒,
+// 得等 TTL(6 小时)。重拉一次相对廉价(单 GitHub API call)。
+func checkForUpgradeCmd(currentVersion string) tea.Cmd {
 	return func() tea.Msg {
-		// 缓存命中
-		if c, ok := readUpdateCheckCache(); ok {
-			return updateCheckResult{LatestVersion: c.LatestVersion, URL: c.URL}
+		if c, ok := readUpgradeCheckCache(); ok {
+			if !versionNewer(c.LatestVersion, currentVersion) {
+				// 缓存里的 latest 已经不比当前新,等于过期 —— 落到下面重拉
+			} else {
+				return upgradeCheckResult{LatestVersion: c.LatestVersion, URL: c.URL}
+			}
 		}
 		ver, url, err := fetchLatestRelease()
 		if err != nil {
-			return updateCheckResult{Err: err}
+			return upgradeCheckResult{Err: err}
 		}
-		writeUpdateCheckCache(updateCheckCache{
+		writeUpgradeCheckCache(upgradeCheckCache{
 			CheckedAt:     time.Now(),
 			LatestVersion: ver,
 			URL:           url,
 		})
-		return updateCheckResult{LatestVersion: ver, URL: url}
+		return upgradeCheckResult{LatestVersion: ver, URL: url}
 	}
 }
 
@@ -106,7 +113,7 @@ func fetchLatestRelease() (string, string, error) {
 		return "", "", err
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("User-Agent", "deepx-update-check")
+	req.Header.Set("User-Agent", "deepx-upgrade-check")
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", "", err
