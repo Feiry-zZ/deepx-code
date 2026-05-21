@@ -146,11 +146,30 @@ type ToolCallFunc struct {
 }
 
 type chatRequest struct {
-	Model     string                 `json:"model"`
-	MaxTokens int                    `json:"max_tokens"`
-	Stream    bool                   `json:"stream"`
-	Messages  []ChatMessage          `json:"messages"`
-	Tools     []tools.OpenAIToolSpec `json:"tools,omitempty"`
+	Model         string                 `json:"model"`
+	MaxTokens     int                    `json:"max_tokens"`
+	Stream        bool                   `json:"stream"`
+	StreamOptions *streamOptions         `json:"stream_options,omitempty"`
+	Messages      []ChatMessage          `json:"messages"`
+	Tools         []tools.OpenAIToolSpec `json:"tools,omitempty"`
+}
+
+type streamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
+}
+
+// UsageInfo 单次 API 调用的 token 用量,含缓存命中信息。
+type UsageInfo struct {
+	PromptTokens          int `json:"prompt_tokens"`
+	CompletionTokens      int `json:"completion_tokens"`
+	TotalTokens           int `json:"total_tokens"`
+	PromptCacheHitTokens  int `json:"prompt_cache_hit_tokens"`
+	PromptCacheMissTokens int `json:"prompt_cache_miss_tokens"`
+}
+
+// UsageMsg 从 agent goroutine 发给 TUI 的单次 API 用量。
+type UsageMsg struct {
+	Usage UsageInfo
 }
 
 type sseChunk struct {
@@ -162,6 +181,7 @@ type sseChunk struct {
 		} `json:"delta"`
 		FinishReason *string `json:"finish_reason"`
 	} `json:"choices"`
+	Usage *UsageInfo `json:"usage,omitempty"`
 }
 
 // chatResponse 非流式响应的完整结构。
@@ -336,7 +356,7 @@ func StartStream(
 			// 不再主动 strip reasoning_content:本轮不切换模型,thinking 模型仍按需回传,
 			// 非 thinking 模型对 history 里的字段视而不见。若个别模型报错,
 			// streamOnce 仍有 errReasoningRequired retry 兜底。
-			assistantContent, reasoning, toolCalls, err := streamOnce(
+			assistantContent, reasoning, toolCalls, usage, err := streamOnce(
 				ctx,
 				currentEntry.APIKey, currentEntry.BaseURL, currentEntry.Model,
 				convo, maxTokens, toolSpecs, ch,
@@ -348,6 +368,10 @@ func StartStream(
 				}
 				ch <- StreamErrMsg{err}
 				return
+			}
+			// 主 agent 的 token 用量发给 TUI 显示。
+			if usage != nil {
+				ch <- UsageMsg{Usage: *usage}
 			}
 
 			// 把本轮 assistant 回复写入历史(含 reasoning_content,thinking 模型下轮需要)
@@ -500,7 +524,7 @@ func StartStream(
 	return ListenToStream(ch), ch
 }
 
-// streamOnce 发起一次 chat/completions 请求,返回 (content, reasoning_content, tool_calls)。
+// streamOnce 发起一次 chat/completions 请求,返回 (content, reasoning_content, tool_calls, usage, error)。
 func streamOnce(
 	ctx context.Context,
 	apiKey, baseURL, modelID string,
@@ -508,35 +532,38 @@ func streamOnce(
 	maxTokens int,
 	toolSpecs []tools.OpenAIToolSpec,
 	ch chan<- tea.Msg,
-) (string, string, []ToolCall, error) {
+) (string, string, []ToolCall, *UsageInfo, error) {
 
 	body, err := json.Marshal(chatRequest{
 		Model:     modelID,
 		MaxTokens: maxTokens,
 		Stream:    true,
+		StreamOptions: &streamOptions{
+			IncludeUsage: true,
+		},
 		Messages:  convo,
 		Tools:     toolSpecs,
 	})
 	if err != nil {
-		return "", "", nil, err
+		return "", "", nil, nil, err
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", baseURL+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
-		return "", "", nil, err
+		return "", "", nil, nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", "", nil, err
+		return "", "", nil, nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
 		b, _ := io.ReadAll(resp.Body)
-		return "", "", nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(b))
+		return "", "", nil, nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(b))
 	}
 
 	var (
@@ -544,6 +571,7 @@ func streamOnce(
 		reasoningBuilder strings.Builder
 		inReasoning      bool
 		toolBuf          = map[int]*ToolCall{}
+		lastUsage        *UsageInfo // stream_options.include_usage 会在最后 chunk 返回 usage
 	)
 
 	scanner := bufio.NewScanner(resp.Body)
@@ -560,6 +588,10 @@ func streamOnce(
 		var chunk sseChunk
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
 			continue
+		}
+		// stream_options.include_usage: 最后 chunk 有 usage、choices 为空
+		if chunk.Usage != nil {
+			lastUsage = chunk.Usage
 		}
 		if len(chunk.Choices) == 0 {
 			continue
@@ -599,7 +631,7 @@ func streamOnce(
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return contentBuilder.String(), reasoningBuilder.String(), nil, err
+		return contentBuilder.String(), reasoningBuilder.String(), nil, lastUsage, err
 	}
 
 	// 按 index 升序拼装最终 tool_calls
@@ -609,7 +641,7 @@ func streamOnce(
 			toolCalls = append(toolCalls, *tc)
 		}
 	}
-	return contentBuilder.String(), reasoningBuilder.String(), toolCalls, nil
+	return contentBuilder.String(), reasoningBuilder.String(), toolCalls, lastUsage, nil
 }
 
 // ListenToStream 把单条事件转给 bubbletea。

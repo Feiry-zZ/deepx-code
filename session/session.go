@@ -57,8 +57,19 @@ type metaFile struct {
 
 // stateFile 是 ~/.deepx/sessions/{sid}/state.json 的结构。
 type stateFile struct {
-	Summary    string `json:"summary"`    // 会话压缩摘要
-	TotalTurns int    `json:"total_turns"` // 当前有效 user 轮数
+	Summary    string         `json:"summary"`              // 会话压缩摘要
+	TotalTurns int            `json:"total_turns"`          // 当前有效 user 轮数
+	LastUsage  *usageSnapshot `json:"last_usage,omitempty"` // 上轮 API 调用 token 用量,启动时回填 Usage section
+}
+
+// usageSnapshot 是 stateFile 内嵌的 token 用量快照,字段名对齐 DeepSeek API。
+// 单独定义而非引用 agent.UsageInfo,避免 session→agent 反向依赖。
+type Usage = usageSnapshot
+type usageSnapshot struct {
+	PromptTokens          int `json:"prompt_tokens"`
+	CompletionTokens      int `json:"completion_tokens"`
+	PromptCacheHitTokens  int `json:"prompt_cache_hit_tokens"`
+	PromptCacheMissTokens int `json:"prompt_cache_miss_tokens"`
 }
 
 // New 给指定 workspace 创建/打开 session。会自动建目录,刷新 meta.json 的 last_seen_at。
@@ -120,6 +131,38 @@ func (m *Manager) SaveSummary(text string, kept int) error {
 		return err
 	}
 	return os.WriteFile(path, data, 0o644)
+}
+
+// SaveUsage 写入 last_usage 字段。失败静默,不影响主流程。
+// 复用 state.json,避免再多一个文件。
+func (m *Manager) SaveUsage(promptTokens, completionTokens, cacheHit, cacheMiss int) {
+	path := filepath.Join(m.rootDir, "state.json")
+	var s stateFile
+	if data, err := os.ReadFile(path); err == nil {
+		_ = json.Unmarshal(data, &s)
+	}
+	s.LastUsage = &usageSnapshot{
+		PromptTokens:          promptTokens,
+		CompletionTokens:      completionTokens,
+		PromptCacheHitTokens:  cacheHit,
+		PromptCacheMissTokens: cacheMiss,
+	}
+	data, _ := json.MarshalIndent(s, "", "  ")
+	_ = os.WriteFile(path, data, 0o644)
+}
+
+// LoadUsage 读 last_usage 字段。文件/字段缺失返回 nil。
+func (m *Manager) LoadUsage() *Usage {
+	path := filepath.Join(m.rootDir, "state.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var s stateFile
+	if err := json.Unmarshal(data, &s); err != nil {
+		return nil
+	}
+	return s.LastUsage
 }
 
 // LoadSummary 从 state.json 读取压缩摘要和 total_turns。

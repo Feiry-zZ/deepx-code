@@ -132,6 +132,9 @@ type model struct {
 
 	// cancelAgent 取消后台 agent 的 context。ESC 中断时调用,真正终止 HTTP 请求和工具调用。
 	cancelAgent context.CancelFunc
+
+	// lastUsage 上一轮主 agent 的 API token 用量,含缓存命中信息。
+	lastUsage *agent.UsageInfo
 }
 
 // reviewResultMsg 审核完成后从 goroutine 发回,恢复流监听。
@@ -210,6 +213,18 @@ func initialModel(models agent.ModelConfig, needsSetup bool) model {
 		session:         sess,
 		skillLoader:     loader,
 		skillCatalog:    skillCatalog,
+	}
+
+	// 回填上轮 token 用量,Usage section 启动后立刻显示真实数字而非 "—"。
+	if sess != nil {
+		if u := sess.LoadUsage(); u != nil {
+			m.lastUsage = &agent.UsageInfo{
+				PromptTokens:          u.PromptTokens,
+				CompletionTokens:      u.CompletionTokens,
+				PromptCacheHitTokens:  u.PromptCacheHitTokens,
+				PromptCacheMissTokens: u.PromptCacheMissTokens,
+			}
+		}
 	}
 
 	// 恢复会话历史:优先尝试二进制 gob 文件(含 tool_calls/tool_results/reasoning),
@@ -894,6 +909,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.plan != nil {
 			m.plan.apply(msg)
 			m.refreshViewport() // 触发 live overlay 重渲染,checkbox 立刻更新
+		}
+		return m, agent.ListenToStream(m.streamCh)
+
+	case agent.UsageMsg:
+		if m.streamCh == nil {
+			return m, nil
+		}
+		// 主 agent 单次 API 用量,仅记录最新一轮(子 agent 的调用不发送 UsageMsg)。
+		m.lastUsage = &msg.Usage
+		// 持久化到 state.json,重启后立刻就有数据,Usage section 不再显示 "—"。
+		if m.session != nil {
+			m.session.SaveUsage(
+				msg.Usage.PromptTokens,
+				msg.Usage.CompletionTokens,
+				msg.Usage.PromptCacheHitTokens,
+				msg.Usage.PromptCacheMissTokens,
+			)
 		}
 		return m, agent.ListenToStream(m.streamCh)
 

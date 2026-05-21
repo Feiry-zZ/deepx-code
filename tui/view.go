@@ -2,6 +2,7 @@ package tui
 
 import (
 	"image/color"
+	"strconv"
 	"strings"
 	"time"
 
@@ -341,10 +342,6 @@ func (m model) rightPanelView() string {
 	// 路径压缩 ~/.../tail
 	cwd := abbreviatePath(m.workspace, rightPanelWidth-2)
 
-	// 上下文用量(全部 history 字符数粗估 token)
-	ctxChars := sumHistoryChars(m.history) + m.currentReply.Len()
-	ctxTokens := estimateTokens(ctxChars)
-
 	// 本轮 elapsed:streaming 时实时 time.Since,idle 时用 stream done 时冻结的 turnElapsed
 	var elapsed time.Duration
 	if m.streaming && !m.turnStartedAt.IsZero() {
@@ -352,10 +349,6 @@ func (m model) rightPanelView() string {
 	} else {
 		elapsed = m.turnElapsed
 	}
-
-	// 本轮 I/O token 估算
-	turnIn := estimateTokens(m.turnInputChars)
-	turnOut := estimateTokens(m.turnOutputChars)
 
 	// 活跃模型用 ▶ 直接标在 MODELS 行的左侧,不占额外行。
 	// 占位用两空格保持非活跃行的对齐。
@@ -408,11 +401,20 @@ func (m model) rightPanelView() string {
 		statusLine,
 		modeLine,
 	})...)
+	// 首轮 API 调用结束才能拿到 lastUsage,没拿到前用 "—" 占位,保持布局一致。
+	promptStr, outputStr, cacheStr := "—", "—", "—"
+	if u := m.lastUsage; u != nil {
+		promptStr = formatTokenCount(u.PromptTokens) + " tok"
+		outputStr = formatTokenCount(u.CompletionTokens) + " tok"
+		if total := u.PromptCacheHitTokens + u.PromptCacheMissTokens; total > 0 {
+			cacheStr = strconv.Itoa(u.PromptCacheHitTokens*100/total) + "% hit"
+		}
+	}
 	rows = append(rows, section("Usage", []string{
-		label("context") + " ~" + formatTokenCount(ctxTokens) + " tok",
-		label("tokens ") + " ↑" + formatTokenCount(turnIn) +
-			" ↓" + formatTokenCount(turnOut) +
-			" " + formatElapsed(elapsed),
+		label("prompt") + " " + promptStr,
+		label("output") + " " + outputStr,
+		label("cache ") + " " + cacheStr,
+		label("time  ") + " " + formatElapsed(elapsed),
 	})...)
 	rows = append(rows, section("Commands", []string{
 		label("/plan   ") + "Write/Bash off",

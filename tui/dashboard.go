@@ -262,12 +262,12 @@ func estimateTokens(chars int) int {
 	return chars / 3
 }
 
-// formatTokenCount 把 token 计数格式化成紧凑字符串: 12 / 1.2k / 12.4k。
+// formatTokenCount 把 token 计数格式化成紧凑字符串: 12 / 1.2K / 12.4K。
 func formatTokenCount(n int) string {
-	if n < 1000 {
+	if n < 1024 {
 		return fmt.Sprintf("%d", n)
 	}
-	return fmt.Sprintf("%.1fk", float64(n)/1000.0)
+	return fmt.Sprintf("%.1fK", float64(n)/1024.0)
 }
 
 // formatElapsed 把 duration 格式化成右栏能塞下的紧凑字符串。
