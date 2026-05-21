@@ -15,9 +15,12 @@ import (
 	"time"
 
 	"charm.land/bubbles/v2/spinner"
+	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/textinput"
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
+	"charm.land/glamour/v2"
+	"charm.land/glamour/v2/styles"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 )
@@ -32,7 +35,7 @@ type model struct {
 	chatViewport viewport.Model
 	chatContent  *chatLog
 
-	input textinput.Model
+	input textarea.Model
 
 	// 整套连接配置 (per-role BaseURL/Model/APIKey),从 ~/.deepx/model.yaml 读取后传入。
 	// 旧的 apiKey/baseURL 单独字段已合并到 models 里,通过 models.Flash.XX / models.Pro.XX 访问。
@@ -101,9 +104,6 @@ type model struct {
 	spinner  spinner.Model
 	thinking bool
 
-	// scrollbarDragging: 左键在滚动条列按下且未松开。该状态下 motion 事件 → SetYOffset。
-	scrollbarDragging bool
-
 	// session 是当前 workspace 的持久化句柄。启动时建/打开 ~/.deepx/sessions/{sid}/,
 	// 写时机:user enter 后 + assistant 流结束(StreamDoneMsg)时各 append 一行。
 	// Memory 工具通过 tools.SetMemorySession 拿到同一句柄,扫 jsonl 命中关键词。
@@ -123,6 +123,20 @@ type model struct {
 	reviewToolArgs string
 	reviewYesNo    bool // true=YES, false=NO
 
+	// /lang 选择 modal 状态。showLangModal=true 时全屏路由按键到 modal,
+	// langModalIdx ∈ {0:zh, 1:en}。
+	showLangModal bool
+	langModalIdx  int
+
+	// 版本信息。version 是 build 时注入的当前版本号(go build 默认 "dev")。
+	// latestVersion 是异步检查得到的 GitHub latest release,空则没检查到 / 网络失败。
+	// updateAvailable 由 versionNewer(latestVersion, version) 算出,渲染时用来决定是否
+	// 在右栏显示"有新版本"提示。
+	version         string
+	latestVersion   string
+	updateAvailable bool
+	updateURL       string
+
 	// 右栏仪表盘字段
 	workspace       string        // os.Getwd() at startup,展示当前工作目录
 	turnStartedAt   time.Time     // 本轮 Enter 时刻,用于实时计算 elapsed
@@ -135,6 +149,11 @@ type model struct {
 
 	// lastUsage 上一轮主 agent 的 API token 用量,含缓存命中信息。
 	lastUsage *agent.UsageInfo
+
+	// mdRenderers 按 wrap width 缓存 glamour renderer 实例。
+	// window resize 时新 width 会触发新 renderer 创建,旧的进 cache 但短期不复用 — 不主动清理,
+	// 内存占用极小(每个实例约几 KB,通常活跃 1-2 个 width)。
+	mdRenderers map[int]*glamour.TermRenderer
 }
 
 // reviewResultMsg 审核完成后从 goroutine 发回,恢复流监听。
@@ -148,15 +167,44 @@ type compressionResultMsg struct {
 	err             error
 }
 
-func initialModel(models agent.ModelConfig, needsSetup bool) model {
+func initialModel(models agent.ModelConfig, needsSetup bool, version string) model {
 	vp := viewport.New()
 
 	sp := spinner.New()
 	sp.Spinner = spinner.MiniDot
 
-	ti := textinput.New()
-	ti.Placeholder = "Type a message... (Enter to send, Esc to interrupt)"
+	ti := textarea.New()
+	ti.Placeholder = T("misc.input_placeholder")
 	ti.CharLimit = 4000
+	ti.ShowLineNumbers = false
+	ti.SetHeight(3)
+	// 输入框样式定制:
+	//   - 第一行显示 "> ",后续行只缩进 2 空格(对齐到内容列)避免每行重复 prompt
+	//   - Prompt 染粉紫(同 banner 主色),focus / blur 状态都保留亮度
+	//   - 内置 CursorLine 高亮(默认会给当前行加背景色)关掉,跟 chat 区无 chrome 风格一致
+	tas := ti.Styles()
+	promptStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("99")).Bold(true)
+	tas.Focused.Prompt = promptStyle
+	tas.Blurred.Prompt = promptStyle
+	tas.Focused.CursorLine = lipgloss.NewStyle()
+	tas.Blurred.CursorLine = lipgloss.NewStyle()
+	tas.Focused.Base = lipgloss.NewStyle()
+	tas.Blurred.Base = lipgloss.NewStyle()
+	// 光标样式:细竖条 + 粉紫色 + 缓慢 blink(600ms),跟 banner 主色一致,
+	// 避免默认 block 光标在中文/emoji 行上把字符整块反色显得突兀。
+	tas.Cursor.Shape = tea.CursorBar
+	tas.Cursor.Color = lipgloss.Color("213") // 亮粉,跟 banner deepx 渐变首色一致
+	tas.Cursor.Blink = true
+	tas.Cursor.BlinkSpeed = 600 * time.Millisecond
+	ti.SetStyles(tas)
+	// 只在第 0 行画 "> ",其它行用 2 空格保持光标列对齐 — promptWidth 必须 = 2 才能让
+	// textarea 内部把光标列正确算到 prompt 之后。
+	ti.SetPromptFunc(2, func(info textarea.PromptInfo) string {
+		if info.LineNumber == 0 {
+			return "> "
+		}
+		return "  "
+	})
 
 	si := textinput.New()
 	si.Placeholder = "sk-..."
@@ -205,7 +253,8 @@ func initialModel(models agent.ModelConfig, needsSetup bool) model {
 		models:          models,
 		activeModelRole: role,
 		activeModelID:   activeID,
-		mode:            agent.AgentMode_Review,
+		version:         version,
+		mode:            agent.AgentMode_Auto,
 		status:          "idle",
 		spinner:         sp,
 		workspace:       wd,
@@ -241,8 +290,6 @@ func initialModel(models agent.ModelConfig, needsSetup bool) model {
 			}
 			m.history = gobHistory
 			rebuildChatFromHistory(m.chatContent, gobHistory)
-			// 提示行独立成段 —— chatLog 预算紧张时优先丢更旧的内容,这条标签反正是装饰。
-			m.chatContent.Open("---\n_(已恢复完整会话)_\n\n")
 			// 如果有会话压缩摘要,更新显示用 totalTurns
 			if len(gobHistory) > 0 && gobHistory[0].Role == "assistant" &&
 				strings.HasPrefix(gobHistory[0].Content, "## 会话摘要") {
@@ -259,23 +306,21 @@ func initialModel(models agent.ModelConfig, needsSetup bool) model {
 				// 摘要作为第一条 assistant 消息
 				summaryMsg := "## 会话摘要\n" + summary
 				m.history = append(m.history, agent.ChatMessage{Role: "assistant", Content: summaryMsg})
-				m.chatContent.Open(rolePrefix("assistant") + summaryMsg + "\n\n---\n\n")
+				m.chatContent.Open(kindAssistant, summaryMsg)
 
 				for _, e := range entries {
 					m.history = append(m.history, agent.ChatMessage{
 						Role:    e.Role,
 						Content: e.Content,
 					})
-					role := "deepx"
+					kind := kindAssistant
 					if e.Role == "user" {
-						role = "You"
-
+						kind = kindUser
 					}
-					m.chatContent.Open(rolePrefix(role) + e.Content + "\n\n")
+					m.chatContent.Open(kind, e.Content)
 				}
 				if len(entries) > 0 {
-					m.chatContent.Open("---\n_(以上为历史对话,共 " +
-						strconv.Itoa(len(entries)) + " 条)_\n\n")
+					m.chatContent.Open(kindSystem, fmt.Sprintf(T("misc.history_suffix"), len(entries)))
 				}
 			} else {
 				// 无压缩摘要:按对加载
@@ -286,20 +331,18 @@ func initialModel(models agent.ModelConfig, needsSetup bool) model {
 						Role:    e.Role,
 						Content: e.Content,
 					})
-					role := "deepx"
+					kind := kindAssistant
 					if e.Role == "user" {
-						role = "You"
-
+						kind = kindUser
 					}
-					m.chatContent.Open(rolePrefix(role) + e.Content + "\n\n")
+					m.chatContent.Open(kind, e.Content)
 				}
 				if len(entries) > 0 {
-					m.chatContent.Open("---\n_(以上为历史对话,共 " +
-						strconv.Itoa(len(entries)) + " 条)_\n\n")
+					m.chatContent.Open(kindSystem, fmt.Sprintf(T("misc.history_suffix"), len(entries)))
 				}
 			}
 
-			// 声明当前模式,通知 LLM 当前状态。模式始终从 review 起步。
+			// 声明当前模式,通知 LLM 当前状态。模式始终从 auto 起步(默认全工具)。
 			// 注意:gob 恢复时跳过此步骤 — 历史已包含之前的 mode notification,
 			// 重复追加会在每次重启时累积,污染 LLM 上下文。
 			msg := modeNotification(m.mode, m.activeModelRole)
@@ -326,7 +369,9 @@ func initialModel(models agent.ModelConfig, needsSetup bool) model {
 }
 
 func (m model) Init() tea.Cmd {
-	return textinput.Blink
+	// textarea 的光标 blink 由 Focus() 返回,启动时一并发起。
+	// checkForUpdateCmd 异步打 GitHub Releases API,完成后通过 updateCheckResult 回送 Update。
+	return tea.Batch(textinput.Blink, m.input.Focus(), checkForUpdateCmd())
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -340,14 +385,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		leftW, vpH := m.layout()
 		m.chatViewport.SetWidth(leftW)
 		m.chatViewport.SetHeight(vpH)
-		m.input.SetWidth(leftW - 4)
+		// textarea 自己包了 prompt 列宽,SetWidth 是整体外宽,直接传 leftW。
+		m.input.SetWidth(leftW)
+		m.input.SetHeight(inputAreaHeight - 1)
 		// 窗口尺寸变了 → wrap 重算 → 老 line 号失效,必须清选区
 		m.selecting = false
 		m.refreshViewport()
 
 	case tea.MouseWheelMsg:
 		// modal 期间忽略
-		if m.showSetup {
+		if m.showSetup || m.showLangModal {
 			return m, nil
 		}
 		// 滚轮: 转给 viewport,顺便取消选区
@@ -359,21 +406,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, c
 
 	case tea.MouseClickMsg:
-		if m.showSetup {
+		if m.showSetup || m.showLangModal {
 			return m, nil
 		}
 		if msg.Button != tea.MouseLeft {
 			return m, nil
 		}
 		leftW, vpH := m.layout()
-		chatLeft, chatTop := 1, 3
+		// chat 区:X 从 0 起,Y 从 0 起(无顶栏);chatRight 由 layout() 算的 leftW 决定。
+		chatLeft, chatTop := 0, 0
 		chatRight := chatLeft + leftW
 		chatBottom := chatTop + vpH
-		scrollbarX := chatRight
 		inputRow := chatTop + vpH // 输入框那一行 (chat 高 vpH,紧贴下面)
 		inChat := msg.X >= chatLeft && msg.X < chatRight &&
-			msg.Y >= chatTop && msg.Y < chatBottom
-		onScrollbar := msg.X == scrollbarX &&
 			msg.Y >= chatTop && msg.Y < chatBottom
 		inInputRow := msg.Y == inputRow && msg.X >= chatLeft && msg.X <= chatRight
 
@@ -397,11 +442,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		if onScrollbar {
-			m.scrollbarDragging = true
-			m.scrollbarSeek(msg.Y, chatTop, vpH)
-			m.refreshViewport()
-		} else if inChat {
+		if inChat {
 			col := msg.X - chatLeft
 			line := m.chatViewport.YOffset() + (msg.Y - chatTop)
 			m.selAnchor = cellPos{col: col, line: line}
@@ -415,21 +456,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.MouseMotionMsg:
-		if m.showSetup {
+		if m.showSetup || m.showLangModal {
 			return m, nil
 		}
 		if msg.Button != tea.MouseLeft {
 			return m, nil
 		}
 		leftW, vpH := m.layout()
-		chatLeft, chatTop := 1, 3
+		// chat 区:X 从 0 起,Y 从 0 起(无顶栏);chatRight 由 layout() 算的 leftW 决定。
+		chatLeft, chatTop := 0, 0
 		chatRight := chatLeft + leftW
 		chatBottom := chatTop + vpH
 
-		if m.scrollbarDragging {
-			m.scrollbarSeek(msg.Y, chatTop, vpH)
-			m.refreshViewport()
-		} else if m.selecting {
+		if m.selecting {
 			scrolled := false
 			if msg.Y < chatTop && !m.chatViewport.AtTop() {
 				m.chatViewport.ScrollUp(1)
@@ -462,15 +501,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.MouseReleaseMsg:
-		if m.showSetup {
+		if m.showSetup || m.showLangModal {
 			return m, nil
 		}
 		if msg.Button != tea.MouseLeft {
 			return m, nil
 		}
-		if m.scrollbarDragging {
-			m.scrollbarDragging = false
-		} else if m.selecting {
+		if m.selecting {
 			text := m.collectSelectionText()
 			if text != "" {
 				_ = writeClipboardText(text)
@@ -523,7 +560,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// 首次启动 modal 不允许 Esc 关闭(还没有配置可用);
 				// 否则正常关闭返回主界面。
 				if m.setupRequired {
-					m.setupErr = "需先填入 API key 才能继续 (Ctrl+C 退出 deepx)"
+					m.setupErr = T("setup.error.required")
 					return m, nil
 				}
 				m.showSetup = false
@@ -536,6 +573,39 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			var c tea.Cmd
 			m.setupInput, c = m.setupInput.Update(msg)
 			return m, c
+		}
+
+		// /lang modal:↑/↓ 切换中英,Enter 确认,Esc 取消
+		if m.showLangModal {
+			switch msg.String() {
+			case "up", "k":
+				if m.langModalIdx > 0 {
+					m.langModalIdx--
+				}
+				return m, nil
+			case "down", "j":
+				if m.langModalIdx < 1 {
+					m.langModalIdx++
+				}
+				return m, nil
+			case "enter":
+				langs := []Lang{LangZH, LangEN}
+				picked := langs[m.langModalIdx]
+				SetLang(picked)
+				m.showLangModal = false
+				// 切换后右栏 / palette 的 desc 都需要刷新一遍
+				m.refreshViewport()
+				name := "中文"
+				if picked == LangEN {
+					name = "English"
+				}
+				m.appendChat("System", fmt.Sprintf(T("lang.switched"), name))
+				return m, nil
+			case "esc", "ctrl+c":
+				m.showLangModal = false
+				return m, nil
+			}
+			return m, nil
 		}
 
 		// review 审核态:↑/↓ 切换 YES/NO, Enter 确认, Esc 拒绝
@@ -586,9 +656,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			case "tab":
 				// 用选中命令替换 input value;光标移到末尾,palette 仍会因 value 完全等于命令
-				// 而匹配它自己一条(只剩 1 项),用户可以再按 Enter 执行,或者继续编辑加参数
+				// 而匹配它自己一条(只剩 1 项),用户可以再按 Enter 执行,或者继续编辑加参数。
+				// textarea 没有 SetCursor 线性接口,SetValue 后用 CursorEnd() 跳到末尾。
 				m.input.SetValue(matches[m.commandPaletteIdx].name)
-				m.input.SetCursor(len(matches[m.commandPaletteIdx].name))
+				m.input.CursorEnd()
 				m.commandPaletteIdx = 0
 				return m, nil
 			case "enter":
@@ -677,15 +748,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.streaming = false
 				m.thinking = false
 				m.status = "idle"
-				m.chatContent.Append("\n\n_已中断_\n\n")
+				m.chatContent.Append(T("misc.interrupted"))
 				m.refreshViewport()
 				return m, nil
 			}
 			return m, nil
 		case "up", "down", "pgup", "pgdown", "pageup", "pagedown", "home", "end", "ctrl+u", "ctrl+d":
+			// chat 区滚动键全部拦截,textarea 不再消费方向键 — 用户明确要求 ↑/↓
+			// 滚 chat,代价是多行 input 不能用方向键移光标(仍可 Left/Right + Backspace 编辑)。
 			var c tea.Cmd
 			m.chatViewport, c = m.chatViewport.Update(msg)
 			return m, c
+		case "alt+enter", "alt+\r", "ctrl+enter", "ctrl+\r", "shift+enter":
+			// 在光标处插入换行,实现多行输入。Enter 仍走下方 submit 分支。
+			// 同时接 Alt+Enter / Ctrl+Enter / Shift+Enter — 不同终端 / OS 上的"换行"组合键各异,
+			// macOS Terminal.app 多用 Alt+Enter,iTerm2 / VSCode / Linux 用户更习惯 Ctrl+Enter / Shift+Enter。
+			if m.streaming {
+				return m, nil
+			}
+			m.input.InsertRune('\n')
+			return m, nil
 		case "ctrl+v":
 			// 先看剪贴板有没有图,有就落盘 + 把 [Image #N] 占位符插到输入框光标处。
 			// 没图则继续下落到 textinput,走文本粘贴。
@@ -737,7 +819,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.turnInputChars = sumHistoryChars(m.history)
 			m.turnOutputChars = 0
 
-			m.chatContent.Open(deepxPrefix)
+			// 不预开 assistant 段 — 空段会渲染成空荡荡的 ╭ + ╰,影响观感。
+			// 等 TokenMsg / ToolCallStartMsg 到达时再由 EnsureKind/Open 真正开段。
+			// 这段空窗期由 spinner "thinking..." 提示填补。
 			m.refreshViewport()
 			// 启动 spinner ticking
 			cmds = append(cmds, m.spinner.Tick)
@@ -769,6 +853,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(cmds...)
 		}
 
+	case updateCheckResult:
+		// 后台升级检查回执:有错就静默忽略,有结果就跟当前版本比一下。
+		// 有新版本时:右栏 banner 下方版本行常驻显示 ↑ 提示;chat 区追加一条 System 消息
+		// 给一次明显提醒(每次启动一次,不打扰)。
+		if msg.Err == nil && msg.LatestVersion != "" {
+			m.latestVersion = msg.LatestVersion
+			m.updateURL = msg.URL
+			m.updateAvailable = versionNewer(msg.LatestVersion, m.version)
+			if m.updateAvailable {
+				cur := m.version
+				if cur == "" {
+					cur = "dev"
+				}
+				m.appendChat("System", fmt.Sprintf(T("update.available"), cur, msg.LatestVersion, msg.URL))
+			}
+		}
+		return m, nil
+
 	case agent.ReasoningTokenMsg:
 		// streamCh 已 nil 说明 ESC/Ctrl+C 中断过了,丢弃残留消息
 		if m.streamCh == nil {
@@ -791,6 +893,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.thinking = false
 		text := string(msg)
 		m.currentReply.WriteString(text)
+		// 上一段若是 tools(刚执行完工具,模型继续说话),切回 assistant 段。
+		m.chatContent.EnsureKind(kindAssistant, "")
 		m.chatContent.Append(text)
 		m.tokens += len([]rune(text))
 		m.turnOutputChars += len([]rune(text))
@@ -804,17 +908,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// 工具调用 = 一次"动作",紧凑单行展示:<icon> Name (主参数)
 		m.status = "tool"
 		line := formatToolCallLine(msg.Name, msg.Args)
-		// 关键:tool 行前必须落到 markdown 的"段落起点"。CommonMark 单个 \n 是 soft break,
-		// glamour 渲染成空格 → "**🐋 deepx**: \n🐚 Bash ..." 就被拼回同一行。
-		// 按 chatContent 现有结尾决定补几个 \n:
-		//   - 已经以 \n 结尾(典型:上一次 tool 行写完):再补 1 个 → 凑成 \n\n 段落分隔
-		//   - 不以 \n 结尾(典型:首次工具调用紧跟 deepxPrefix,或 stream 完正文后再调工具):
-		//     补 2 个 → 强制段落分隔,避免被吸到上一行
-		sep := "\n\n"
-		if m.chatContent.EndsWithNewline() {
-			sep = "\n"
+		// 切到 tools 段。tools 段不走 markdown 渲染(refreshViewport 里特判),
+		// 所以单 \n 直接换行,无需 hard break trick。连续 tool_call 同段归并 → 一组色条。
+		if m.chatContent.LastKind() == kindTools {
+			if !m.chatContent.EndsWithNewline() {
+				m.chatContent.Append("\n")
+			}
+			m.chatContent.Append(line + "\n")
+		} else {
+			m.chatContent.Open(kindTools, line+"\n")
 		}
-		m.chatContent.Append(sep + line + "\n")
 		m.refreshViewport()
 		// review 模式:暂停流,等待用户确认
 		if msg.ReviewCh != nil {
@@ -934,11 +1037,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		// 流结束时把当前 plan 最终状态固化进 chatContent,这样滚回历史还能看到。
-		// 在写 "\n\n" 之前固化,plan 留在本轮回复结尾。
+		// plan 渲染贴在当前 assistant 段尾部,共用一根色条。
 		if m.plan != nil {
+			m.chatContent.EnsureKind(kindAssistant, "")
 			m.chatContent.Append("\n" + renderPlanForChat(m.plan))
 		}
-		m.chatContent.Append("\n\n")
 		// 持久化助手最终回复。currentReply 在流式过程中累加,这里一次性落盘。
 		// 注意只存"主对话内容" —— tool_call / tool_result / reasoning 都不进 session 文件。
 		if m.session != nil {
@@ -1020,7 +1123,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			_ = m.session.SaveGob("history.gob", m.history)
 		}
 
-		m.chatContent.Open(fmt.Sprintf("\n---\n**已压缩会话历史（%d 轮→摘要）**\n\n", msg.compressedTurns))
+		m.chatContent.Open(kindSystem, fmt.Sprintf("**已压缩会话历史（%d 轮→摘要）**", msg.compressedTurns))
 		m.refreshViewport()
 		return m, nil
 	}
@@ -1189,47 +1292,30 @@ func saveAttachedImage(data []byte, index int) (string, error) {
 	return path, nil
 }
 
-// insertImagePlaceholder 在输入框当前光标位置插入 [Image #n],
-// 必要时在前后补空格,避免和相邻字符黏在一起。
+// insertImagePlaceholder 在输入框当前光标位置插入 [Image #n]。
+// textarea 自带 InsertString,前后补一个空格直接交给它处理光标——简化版,
+// 不再判断光标两侧字符。多一两个空格无碍 LLM 解析。
 func (m *model) insertImagePlaceholder(n int) {
-	placeholder := fmt.Sprintf("[Image #%d]", n)
-	cur := []rune(m.input.Value())
-	pos := m.input.Position()
-	if pos < 0 || pos > len(cur) {
-		pos = len(cur)
-	}
-	prefix := ""
-	if pos > 0 && cur[pos-1] != ' ' {
-		prefix = " "
-	}
-	suffix := ""
-	if pos < len(cur) && cur[pos] != ' ' {
-		suffix = " "
-	}
-	ins := []rune(prefix + placeholder + suffix)
-	m.input.SetValue(string(cur[:pos]) + string(ins) + string(cur[pos:]))
-	m.input.SetCursor(pos + len(ins))
+	m.input.InsertString(fmt.Sprintf(" [Image #%d] ", n))
 }
 
-// rolePrefix 把内部 role 名映射成 chatContent 里要写入的 markdown 前缀。
-// glamour 渲染时 **...** 会变粗体,emoji 给视觉锚点,跨终端比 ANSI 着色稳。
-// 未知 role 走兜底 "**role**: ",不会丢字。
-func rolePrefix(role string) string {
-	role = strings.ToLower(role)
-	switch role {
-	case "you":
-		return userPrefix
-	case "system":
-		return systemPrefix
+// roleKind 把内部 role 名映射成 chatLog 段 kind。
+// 决定渲染时套哪根色条 — 不再在 raw 里加任何 "**emoji 名**: " 前缀,
+// 身份完全由色条承载,正文跟用户输入保持原貌。
+func roleKind(role string) string {
+	switch strings.ToLower(role) {
+	case "user", "you":
+		return kindUser
 	case "deepx", "assistant":
-		return deepxPrefix
-	default:
-		return "**" + role + "**: "
+		return kindAssistant
+	case "tools", "tool":
+		return kindTools
 	}
+	return kindSystem
 }
 
 func (m *model) appendChat(role, text string) {
-	m.chatContent.Open(rolePrefix(role) + text + "\n\n")
+	m.chatContent.Open(roleKind(role), text)
 	m.refreshViewport()
 }
 
@@ -1257,16 +1343,24 @@ func rebuildChatFromHistory(cl *chatLog, history []agent.ChatMessage) {
 		switch msg.Role {
 		case "user":
 			if msg.Content != "" {
-				cl.Open(rolePrefix("You") + msg.Content + "\n\n")
+				cl.Open(kindUser, msg.Content)
 			}
 		case "assistant":
 			if msg.Content != "" {
-				cl.Open(rolePrefix("deepx") + msg.Content + "\n\n")
+				cl.Open(kindAssistant, msg.Content)
 			}
-			// 工具调用行:跟直播流 ToolCallStartMsg 相同的格式
+			// 工具调用行:同 ToolCallStartMsg,连续 tool_call 归并到同一段(同 kind)。
+			// tools 段跳过 markdown 渲染,单 \n 即可保证每条单独一行。
 			for _, tc := range msg.ToolCalls {
 				line := formatToolCallLine(tc.Function.Name, tc.Function.Arguments)
-				cl.Open(line + "\n")
+				if cl.LastKind() == kindTools {
+					if !cl.EndsWithNewline() {
+						cl.Append("\n")
+					}
+					cl.Append(line + "\n")
+				} else {
+					cl.Open(kindTools, line+"\n")
+				}
 			}
 		}
 	}
@@ -1275,16 +1369,18 @@ func rebuildChatFromHistory(cl *chatLog, history []agent.ChatMessage) {
 func modeNotification(mode agent.AgentMode, modelRole string) string {
 	modelPart := ""
 	if modelRole != "" {
-		modelPart = ", 模型: " + modelRole
+		modelPart = T("mode.model_suffix") + modelRole
 	}
+	var name string
 	switch mode {
 	case agent.AgentMode_Plan:
-		return "当前模式: plan" + modelPart
+		name = T("mode.plan")
 	case agent.AgentMode_Review:
-		return "当前模式: review" + modelPart
+		name = T("mode.review")
 	default:
-		return "当前模式: auto" + modelPart
+		name = T("mode.auto")
 	}
+	return T("mode.current_prefix") + name + modelPart
 }
 
 // handleSlashCommand 处理本地斜杠命令。// handleSlashCommand 处理本地斜杠命令。
@@ -1316,30 +1412,22 @@ func (m *model) handleSlashCommand(input string) {
 			_ = m.session.Append("assistant", msg)
 		}
 	case "/mode":
-		m.appendChat("assistant", fmt.Sprintf("当前模式: %s", m.mode))
+		m.appendChat("assistant", fmt.Sprintf(T("mode.show"), m.mode))
 	case "/config":
 		m.openSetupModal()
 	case "/skills":
 		m.appendChat("assistant", m.skillsListMessage())
+	case "/lang":
+		m.showLangModal = true
+		// 默认光标停在当前语言上
+		m.langModalIdx = 0
+		if CurrentLang() == LangEN {
+			m.langModalIdx = 1
+		}
 	case "/help":
-		// 走 markdown 列表 — chatContent 经 glamour 渲染,缩进对齐文本会被当 code block 处理,
-		// `-` 项目符号更稳。每项格式: "`/cmd` — 说明"。
-		m.appendChat("assistant", "\n**Slash 命令**\n\n"+
-			"- `/plan` — 切到只读模式(仅 Read / List / Grep / Glob / Tree / Search / Fetch / Memory)\n"+
-			"- `/auto` — 切回全工具模式(默认)\n"+
-			"- `/review` — 切到审核模式(Write/Update/Bash 需人工确认)\n"+
-			"- `/mode` — 显示当前模式\n"+
-			"- `/config` — 重新配置 API key (覆盖 `~/.deepx/model.yaml`)\n"+
-			"- `/skills` — 列出可用 skill\n"+
-			"- `/help` — 帮助\n\n"+
-			"**快捷键**\n\n"+
-			"- `Enter` — 发送\n"+
-			"- `Ctrl+Shift+A` / macOS `Cmd+Shift+A` — 输入框全选\n"+
-			"- `Ctrl+V` — 粘贴(含图片)\n"+
-			"- `Esc` — 中断当前对话\n"+
-			"- `Ctrl+C` — 退出程序")
+		m.appendChat("assistant", T("help.body"))
 	default:
-		m.appendChat("assistant", fmt.Sprintf("未知命令: %s (输入 /help 查看)", cmd))
+		m.appendChat("assistant", fmt.Sprintf(T("mode.unknown_cmd"), cmd))
 	}
 }
 
@@ -1397,428 +1485,117 @@ func (m *model) skillsListMessage() string {
 	return strings.TrimRight(sb.String(), "\n")
 }
 
-// scrollbarSeek 按鼠标 Y 在 chat 高度里的比例,直接 SetYOffset。
-// chatTop 是 chat 区首行的屏幕绝对行号,vpH 是 chat 区高度。
-func (m *model) scrollbarSeek(mouseY, chatTop, vpH int) {
-	total := m.chatViewport.TotalLineCount()
-	vis := m.chatViewport.VisibleLineCount()
-	if total <= vis || vpH <= 1 {
-		return
-	}
-	rel := mouseY - chatTop
-	if rel < 0 {
-		rel = 0
-	}
-	if rel > vpH-1 {
-		rel = vpH - 1
-	}
-	pct := float64(rel) / float64(vpH-1)
-	m.chatViewport.SetYOffset(int(pct * float64(total-vis)))
-}
-
-// collectSelectionText 从当前 chatContent 抠出选区文本(经过同样的 wrap 再按列裁剪),
-// 用于 mouse-release 时写入剪贴板。
+// collectSelectionText 从当前显示的渲染内容里抠出选区文本,用于 mouse-release 时写入剪贴板。
+// 走跟 refreshViewport 同源的 renderChatBaseContent — 行号跟用户在屏幕上看到的一一对应。
 func (m *model) collectSelectionText() string {
 	w := m.chatViewport.Width()
 	if w <= 0 {
 		return ""
 	}
-	content := m.chatContent.String()
-	content = ansi.Wrap(content, w, " -")
+	content := m.renderChatBaseContent(w)
 	return extractSelectionText(content, m.selAnchor, m.selEnd, w)
 }
 
-// renderMarkdown 把 chatContent 转成 styled ANSI 输出。
-// 关键预处理:ansi.Strip 剥掉 chatContent 里已有的 ANSI 转义(如 deepxPrefix 的着色),
-// 避免下游再次被当 literal 处理。代价:丢 prefix 蓝色加粗,但 **bold** 标记会让 prefix 重新粗体。
-// 支持: **bold** / *italic* / `code` / ### heading / --- / - list / ``` code blocks。
-// 末尾用 ansi.Wrap 按 width 软换行,等价于旧 glamour 的 WithWordWrap。
+// renderMarkdown 用 glamour 渲染 markdown 到 styled ANSI。
+//
+// 关键预处理:ansi.Strip 剥掉 chatContent 里已有的 ANSI 转义,避免下游再次被当 literal。
+// glamour 提供完整 GFM(table / fence / list / heading / link)+ chroma 语法高亮 + 内置主题。
+//
+// 渲染器按 width 缓存:同样 width 复用同一个 TermRenderer 实例,window resize 时
+// 新 width 触发新实例创建(旧实例进 cache,内存占用极小)。glamour 的 wordWrap 在
+// renderer 创建时固定,所以 width 必须 = key。
 func (m *model) renderMarkdown(content string, width int) string {
 	if width <= 0 || content == "" {
 		return content
 	}
 	content = ansi.Strip(content)
-
-	// 定义 ANSI style 生成器
-	bold := lipgloss.NewStyle().Bold(true).Render
-	italic := lipgloss.NewStyle().Italic(true).Render
-	code := lipgloss.NewStyle().Foreground(lipgloss.Color("11")).Render
-	dim := lipgloss.NewStyle().Foreground(dimColor).Render
-	heading := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15")).Render
-	divider := dim(strings.Repeat("─", width))
-
-	lines := strings.Split(content, "\n")
-	var out []string
-
-	for i := 0; i < len(lines); i++ {
-		line := lines[i]
-
-		// 代码块: look-ahead 寻找匹配的 close fence。找到才进 code-block 模式,
-		// 否则当普通行处理。这样 LLM 输出的未闭合 fence(stream 截断 / hallucinate)
-		// 不会让整段后续内容被 dim 当作代码 —— 用户复现过历史会话里 fence 奇数 →
-		// 表格、bold 标记全被 dim 字面化的 bug。
-		if strings.HasPrefix(line, "~~~") || strings.HasPrefix(line, "```") {
-			marker := line[:3]
-			// infostring(fence 后的 lang 标签)区分 diff 块,后面按 -/+/@ 上色。
-			info := strings.TrimSpace(line[3:])
-			closeIdx := -1
-			// 扫到下一个 rolePrefix 行或者 marker 闭合;rolePrefix 是消息硬边界,
-			// 跨边界的 fence 一律视为未闭合,避免上一条消息污染下一条。
-			for j := i + 1; j < len(lines); j++ {
-				if isMessagePrefix(lines[j]) {
-					break
-				}
-				if strings.HasPrefix(lines[j], marker) {
-					closeIdx = j
-					break
-				}
-			}
-			if closeIdx > i {
-				isDiff := info == "diff"
-				for k := i; k <= closeIdx; k++ {
-					if isDiff && k != i && k != closeIdx {
-						out = append(out, colorizeDiffLine(lines[k], dim))
-					} else {
-						out = append(out, dim(lines[k]))
-					}
-				}
-				i = closeIdx
-				continue
-			}
-			// 未闭合:fence 行本身渲染成 dim,但不进入 code-block 状态
-			out = append(out, dim(line))
-			continue
-		}
-
-		empty := strings.TrimSpace(line) == ""
-
-		// 空行:段落分隔
-		if empty {
-			out = append(out, "")
-			continue
-		}
-
-		// 分隔线 ---
-		if strings.TrimSpace(line) == "---" {
-			out = append(out, divider)
-			continue
-		}
-
-		// GFM table:header 行起手 `|`,下一行是对齐行(`|:---|---:|...|`)。
-		// 收集到下一条非 `|` 起手的行作为表格结束,renderTable 用 lipgloss 画 unicode 边框。
-		if strings.HasPrefix(strings.TrimSpace(line), "|") && i+1 < len(lines) && isTableSeparator(lines[i+1]) {
-			end := i + 2
-			for end < len(lines) && strings.HasPrefix(strings.TrimSpace(lines[end]), "|") {
-				end++
-			}
-			out = append(out, renderTable(lines[i:end], bold, italic, code, dim))
-			i = end - 1
-			continue
-		}
-
-		// 标题 ## 或 ###
-		trimmed := line
-		level := 0
-		for strings.HasPrefix(trimmed, "#") {
-			level++
-			trimmed = strings.TrimLeft(trimmed, "# ")
-		}
-		if level > 0 && trimmed != "" {
-			out = append(out, heading(trimmed))
-			continue
-		}
-
-		// 列表项 - 或 *
-		if len(line) > 2 && (line[0] == '-' || line[0] == '*') && line[1] == ' ' {
-			rest := line[2:]
-			rest = renderInline(rest, bold, italic, code)
-			out = append(out, dim(" • ")+rest)
-			continue
-		}
-
-		// 普通段落:行内渲染
-		rendered := renderInline(line, bold, italic, code)
-		out = append(out, rendered)
+	r := m.mdRenderer(width)
+	if r == nil {
+		// 极端情况(glamour 初始化失败)兜底返回 raw,不让 chat 区空白
+		return content
 	}
-
-	// ansi.Wrap 对每行按 width 软换行,保留 ANSI styling。
-	// 旧 glamour 用 WithWordWrap 做这事,迁移后必须手动补上,否则长行溢出 viewport。
-	return ansi.Wrap(strings.Join(out, "\n"), width, " -")
+	out, err := r.Render(content)
+	if err != nil {
+		return content
+	}
+	// glamour 输出末尾常带 \n,trim 掉避免段间多 1 空行
+	return strings.TrimSuffix(out, "\n")
 }
 
-// colorizeDiffLine 按 unified-diff 行首给 ~~~diff 块的内容上色:
-//   - `+` 绿(color 10) — 新增
-//   - `-` 红(color 9)  — 删除
-//   - `@` cyan(color 14)— hunk header (`@@ ... @@`)
+// mdRenderer 按 width lazy 获取/创建 glamour renderer。
+// 基于 dark 主题但收紧 document margin / block-prefix / block-suffix —— 默认 margin 2
+// 会让每段内容左偏 2 列,跟我们外层的色条加起来视觉太松散;BlockPrefix/Suffix 的 "\n"
+// 会让段首/段尾各多出 1 空行。这里全压成 0,让 glamour 输出紧贴色条。
 //
-// 其它行(context 行、`... (N more lines)` 等)走 fallback (调用方传入的 dim)。
-// 单独 `+` / `-` / `@` 行视为前缀:用 HasPrefix 而不是首字符匹配,避免空行误判。
-func colorizeDiffLine(line string, fallback func(...string) string) string {
-	switch {
-	case strings.HasPrefix(line, "+"):
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("10")).Render(line)
-	case strings.HasPrefix(line, "-"):
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Render(line)
-	case strings.HasPrefix(line, "@"):
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("14")).Render(line)
-	default:
-		return fallback(line)
+// WithEmoji 开 :smile: → 😄 之类的 shortcode 转换,LLM 输出常用。
+func (m *model) mdRenderer(width int) *glamour.TermRenderer {
+	if m.mdRenderers == nil {
+		m.mdRenderers = make(map[int]*glamour.TermRenderer)
 	}
-}
+	if r, ok := m.mdRenderers[width]; ok {
+		return r
+	}
+	style := styles.DarkStyleConfig // value copy
+	style.Document.BlockPrefix = ""
+	style.Document.BlockSuffix = ""
+	zero := uint(0)
+	style.Document.Margin = &zero
+	// chroma 解析失败的 token 会被当 "error" 渲染,dark 主题默认给 error 加红粉色背景
+	// (#F05B5B),整块代码段就成大块红斑。LLM 输出经常是 ASCII art、无 lang 标签的代码块
+	// 或者 chroma 没有 lexer 的小众语言,触发率高 — 把背景清掉,只留前景色即可。
+	if style.CodeBlock.Chroma != nil {
+		style.CodeBlock.Chroma.Error.BackgroundColor = nil
+	}
 
-// isMessagePrefix 判断一行是否以已知 rolePrefix 起手(deepx / 用户 / system / 兜底 role)。
-// 用于在 message 边界强制重置 inCodeBlock,避免上一条消息里的未闭合 fence 污染下一条。
-// 匹配:`**🐋 deepx**: ...`、`**👤 我**: ...`、`**⚙ System**: ...`、`**<word>**: ...`。
-func isMessagePrefix(line string) bool {
-	if !strings.HasPrefix(line, "**") {
-		return false
-	}
-	// 在前 60 字节内找 "**:" 或 "**: ",保证 prefix 形态。content 里 **bold**: 这种
-	// 巧合命中概率低,且即使误命中也只是多关一次 code block,对正常文本无副作用。
-	scan := line
-	if len(scan) > 60 {
-		scan = scan[:60]
-	}
-	return strings.Contains(scan[2:], "**:")
-}
-
-// splitTableRow 把 `| a | b | c |` 切成 ["a", "b", "c"]。
-// 不严格校验 escape(`\|`)— 当前 deepx 场景 LLM 几乎不会输出 escaped pipe。
-func splitTableRow(row string) []string {
-	row = strings.TrimSpace(row)
-	if !strings.HasPrefix(row, "|") {
+	r, err := glamour.NewTermRenderer(
+		glamour.WithStyles(style),
+		glamour.WithWordWrap(width),
+		glamour.WithEmoji(),
+	)
+	if err != nil {
 		return nil
 	}
-	row = strings.TrimPrefix(row, "|")
-	row = strings.TrimSuffix(row, "|")
-	return strings.Split(row, "|")
+	m.mdRenderers[width] = r
+	return r
 }
 
-// isTableSeparator 判断行是否是 GFM 表格对齐行,如 `|:---|---:|:---:|`。
-// 要求每个 cell 只含 `-` 和 `:`,且非空。
-func isTableSeparator(row string) bool {
-	cells := splitTableRow(row)
-	if len(cells) == 0 {
-		return false
-	}
-	for _, c := range cells {
-		c = strings.TrimSpace(c)
-		if c == "" {
-			return false
+// renderChatBaseContent 渲染 chat 区基础内容(含色条 / 思考动画 / plan),不含选区高亮。
+// refreshViewport 和 collectSelectionText 共享这份输出,保证"屏幕显示"和"复制到剪贴板"基于
+// 同一份文本(避免之前 collectSelectionText 走 ansi.Wrap raw,行号跟 markdown 渲染对不上的 bug)。
+func (m *model) renderChatBaseContent(w int) string {
+	// 按 segment 渲染:每段独立缓存 ANSI,流式期间只有最后一段(被 Append 清过 ansi)
+	// 真正走重渲;前面段直接复用。resize 时所有段的 ansiWidth 不匹配,会整体重渲。
+	//
+	// kind == kindTools 时跳过 glamour:tools 段是结构化的工具调用列表(每行一条),
+	// 走 markdown 会把多 tool 行的单 \n 当 soft break 拼成一行 — 不是想要的。
+	// 直接保留 raw \n + emoji spacing,再加缩进色条即可。
+	content := m.chatContent.Render(w, func(raw, kind string, width int) string {
+		var inner string
+		if kind == kindTools {
+			inner = ensureEmojiSpacingANSI(ensureEmojiSpacing(raw))
+		} else {
+			inner = ensureEmojiSpacingANSI(m.renderMarkdown(ensureEmojiSpacing(raw), barInnerWidth(width, kind)))
 		}
-		for _, r := range c {
-			if r != '-' && r != ':' {
-				return false
-			}
-		}
-	}
-	return true
-}
+		inner = strings.TrimRight(inner, "\n")
+		return applyQuoteBar(inner, kind)
+	})
 
-// renderTable 把 GFM table 行渲染成 unicode 框线表格。
-// rows[0] 是 header,rows[1] 是对齐行(消费掉、不输出),rows[2:] 是 body。
-// 每个 cell 走 renderInline,所以 `**bold**`/`` `code` ``/`*italic*` 在表格里也工作。
-// 列宽按 cell 显示宽度的列向最大值取(用 lineDisplayWidth 测,emoji 强制 2 cell)。
-func renderTable(rows []string, bold, italic, code, dim func(...string) string) string {
-	if len(rows) < 2 {
-		return strings.Join(rows, "\n")
+	// plan / spinner 是临时态(只在 streaming 期间显示),不另外画色条避免跟最后一段
+	// 的 ╰ 视觉重复。简单缩进 2 列,让它视觉上像是当前段的"延续"。
+	if m.plan != nil && m.streaming {
+		content += "\n" + indentBlock(renderPlanForChat(m.plan), "  ")
 	}
-	parsed := make([][]string, 0, len(rows))
-	for _, row := range rows {
-		cells := splitTableRow(row)
-		if len(cells) > 0 {
-			parsed = append(parsed, cells)
-		}
+	if m.thinking {
+		content += "\n  " + m.spinner.View() + " thinking..."
 	}
-	if len(parsed) < 2 {
-		return strings.Join(rows, "\n")
-	}
-
-	// 对齐:`:---` left, `---:` right, `:---:` center
-	alignCells := parsed[1]
-	aligns := make([]string, len(alignCells))
-	for i, c := range alignCells {
-		c = strings.TrimSpace(c)
-		leftBias := strings.HasPrefix(c, ":")
-		rightBias := strings.HasSuffix(c, ":")
-		switch {
-		case leftBias && rightBias:
-			aligns[i] = "center"
-		case rightBias:
-			aligns[i] = "right"
-		default:
-			aligns[i] = "left"
-		}
-	}
-
-	data := make([][]string, 0, len(parsed)-1)
-	data = append(data, parsed[0])
-	data = append(data, parsed[2:]...)
-
-	numCols := 0
-	for _, r := range data {
-		if len(r) > numCols {
-			numCols = len(r)
-		}
-	}
-	for len(aligns) < numCols {
-		aligns = append(aligns, "left")
-	}
-
-	// 预渲染所有 cell + 测宽
-	cells := make([][]string, len(data))
-	widths := make([][]int, len(data))
-	colW := make([]int, numCols)
-	for i, r := range data {
-		cells[i] = make([]string, numCols)
-		widths[i] = make([]int, numCols)
-		for c := 0; c < numCols; c++ {
-			raw := ""
-			if c < len(r) {
-				raw = strings.TrimSpace(r[c])
-			}
-			cells[i][c] = renderInline(raw, bold, italic, code)
-			w := lineDisplayWidth(cells[i][c])
-			widths[i][c] = w
-			if w > colW[c] {
-				colW[c] = w
-			}
-		}
-	}
-
-	var sb strings.Builder
-	drawSep := func(left, mid, right string) {
-		sb.WriteString(dim(left))
-		for c := 0; c < numCols; c++ {
-			sb.WriteString(dim(strings.Repeat("─", colW[c]+2)))
-			if c < numCols-1 {
-				sb.WriteString(dim(mid))
-			}
-		}
-		sb.WriteString(dim(right))
-	}
-	drawRow := func(rowCells []string, rowWidths []int) {
-		sb.WriteString(dim("│"))
-		for c := 0; c < numCols; c++ {
-			pad := colW[c] - rowWidths[c]
-			if pad < 0 {
-				pad = 0
-			}
-			switch aligns[c] {
-			case "right":
-				sb.WriteString(" " + strings.Repeat(" ", pad) + rowCells[c] + " ")
-			case "center":
-				lp := pad / 2
-				rp := pad - lp
-				sb.WriteString(" " + strings.Repeat(" ", lp) + rowCells[c] + strings.Repeat(" ", rp) + " ")
-			default:
-				sb.WriteString(" " + rowCells[c] + strings.Repeat(" ", pad) + " ")
-			}
-			sb.WriteString(dim("│"))
-		}
-	}
-
-	drawSep("┌", "┬", "┐")
-	sb.WriteString("\n")
-	drawRow(cells[0], widths[0])
-	sb.WriteString("\n")
-	drawSep("├", "┼", "┤")
-	for i := 1; i < len(cells); i++ {
-		sb.WriteString("\n")
-		drawRow(cells[i], widths[i])
-	}
-	sb.WriteString("\n")
-	drawSep("└", "┴", "┘")
-	return sb.String()
-}
-
-// renderInline 处理行内 markdown 标记: **bold** / *italic* / `code`
-func renderInline(s string, bold, italic, code func(...string) string) string {
-	var buf strings.Builder
-	runes := []rune(s)
-	i := 0
-	for i < len(runes) {
-		// ```inline code``` — 优先匹配较长 fence
-		if i+2 < len(runes) && runes[i] == '`' && runes[i+1] == '`' && runes[i+2] == '`' {
-			end := findClosing(runes, i+3, '`', '`', '`')
-			if end >= 0 {
-				buf.WriteString(code(string(runes[i+3 : end])))
-				i = end + 3
-				continue
-			}
-		}
-		// `inline code`
-		if runes[i] == '`' {
-			end := findClosing(runes, i+1, '`')
-			if end >= 0 {
-				buf.WriteString(code(string(runes[i+1 : end])))
-				i = end + 1
-				continue
-			}
-		}
-		// **bold**
-		if i+1 < len(runes) && runes[i] == '*' && runes[i+1] == '*' {
-			end := findClosing(runes, i+2, '*', '*')
-			if end >= 0 {
-				buf.WriteString(bold(string(runes[i+2 : end])))
-				i = end + 2
-				continue
-			}
-		}
-		// *italic*
-		if runes[i] == '*' {
-			end := findClosing(runes, i+1, '*')
-			if end >= 0 {
-				buf.WriteString(italic(string(runes[i+1 : end])))
-				i = end + 1
-				continue
-			}
-		}
-		buf.WriteRune(runes[i])
-		i++
-	}
-	return buf.String()
-}
-
-// findClosing 在切片 runes[start:] 找连续 N 个 target rune,返回结束索引(不含)。
-// 找不到返回 -1。
-func findClosing(runes []rune, start int, targets ...rune) int {
-	n := len(targets)
-	if start+n > len(runes) {
-		return -1
-	}
-	for i := start; i <= len(runes)-n; i++ {
-		match := true
-		for j := 0; j < n; j++ {
-			if runes[i+j] != targets[j] {
-				match = false
-				break
-			}
-		}
-		if match {
-			return i
-		}
-	}
-	return -1
+	return content
 }
 
 func (m *model) refreshViewport() {
 	atBottom := m.chatViewport.AtBottom()
 	w := m.chatViewport.Width()
 
-	// 按 segment 渲染:每段独立缓存 ANSI,流式期间只有最后一段(被 Append 清过 ansi)
-	// 真正走重渲;前面段直接复用。resize 时所有段的 ansiWidth 不匹配,会整体重渲。
-	content := m.chatContent.Render(w, func(raw string, width int) string {
-		return ensureEmojiSpacingANSI(m.renderMarkdown(ensureEmojiSpacing(raw), width))
-	})
-
-	// plan / spinner 是 ANSI widget,叠加在 markdown 渲染之后。
-	if m.plan != nil && m.streaming {
-		content += "\n" + renderPlanForChat(m.plan)
-	}
-	if m.thinking {
-		content += m.spinner.View() + " thinking..."
-	}
+	content := m.renderChatBaseContent(w)
 	if m.selecting && w > 0 {
 		content = applySelectionHighlight(content, m.selAnchor, m.selEnd, w)
 	}

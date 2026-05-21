@@ -15,109 +15,122 @@ import (
 // v2 的 View() 不再返回 string,而是带元数据的结构体;终端选项也从 NewProgram 的
 // option 迁到 View 字段(声明式)。
 //
-// MouseMode 故意保持 None:bubbletea v2 只有 None/CellMotion/AllMotion 三档,
-// 任何非 None 模式都会让终端进入 DEC 1000/1006 鼠标接管协议,native 拖拽选择/复制就失效。
-// 我们选择保留终端原生选择(拖拽=选,Cmd+C=复制),代价是 chat 区不能滚轮翻滚,
-// 改用 PgUp/PgDown/↑↓ 键盘滚动(model.go 已支持)。
+// MouseMode = CellMotion:启用 DEC 1002 + SGR 1006,鼠标事件(wheel / click / drag)
+// 全部送进程序。代价是 native 终端拖拽选择被接管 — 用户要在 chat 区拖拽选择得用
+// Option+拖拽(macOS Terminal.app / iTerm2 / Kitty 都支持 Option/Alt 旁路鼠标追踪)。
+// 收益是触控板/滚轮直接滚 chat(MouseWheelMsg → chatViewport.Update),
+// 程序内拖拽选区会高亮并在松开时写入系统剪贴板(model.go 的 selection 流程)。
 func (m model) wrapView(content string) tea.View {
 	v := tea.NewView(content)
 	v.AltScreen = true
-	v.MouseMode = tea.MouseModeNone
+	v.MouseMode = tea.MouseModeCellMotion
+	// 开 Kitty keyboard 协议的"alternate keys"上报 — 让 Ctrl+Enter / Shift+Enter
+	// 等组合键以独立 escape 序列发到程序,而不是被终端合并成普通 Enter。
+	// 支持的终端:Kitty / Wezterm / Foot / iTerm2(实验性);macOS Terminal.app 不支持
+	// (这俩组合在 Terminal.app 下仍跟 Enter 等价,只能用 Alt/Option+Enter 换行)。
+	v.KeyboardEnhancements.ReportAlternateKeys = true
 	return v
 }
 
-// layout 计算左侧 viewport 的宽度与高度。
+// inputAreaHeight 是底部输入框占用的固定行数。textarea 3 行 + 1 行顶部留白让输入区跟
+// 上方 chat 视觉分开。改这个值要同步 palette overlay 起点。
+const inputAreaHeight = 4
+
+// layout 计算 chat viewport 的宽度与高度。
 // 总体结构:
 //
-//	外框(1) + 标题(1) + 横分隔(1) + viewport + 输入(1) + 外框(1) = m.height
-//	所以 viewport 高度 = m.height - 5。
-//
-// 水平方向:innerW = chat + 滚动条(1) + 纵向分隔线(1) + right panel。
+//	body(vpH) + input(inputAreaHeight) = m.height
+//	body 内部:chat(leftW) + divider(1) + rightPanel(rightW),banner 摆右栏顶部。
+//	vpH = m.height - inputAreaHeight
+//	leftW = m.width - rightPanelWidth - 1
 func (m model) layout() (leftW, vpH int) {
-	innerW := m.width - 2
 	rightW := rightPanelWidth
-	if rightW > innerW/2 {
-		rightW = innerW / 2
+	if rightW > m.width/2 {
+		rightW = m.width / 2
 	}
-	leftW = innerW - rightW - 1 - 1 // 1 = 纵向分隔线, 1 = chat 右边的滚动条列
-	vpH = m.height - 5
+	leftW = m.width - rightW - 1
+	if leftW < 1 {
+		leftW = 1
+	}
+	vpH = m.height - inputAreaHeight
+	if vpH < 1 {
+		vpH = 1
+	}
 	return
 }
 
 func (m model) View() tea.View {
 	if m.width < 30 || m.height < 7 {
-		return m.wrapView("Terminal too small.")
+		return m.wrapView(T("misc.terminal_too_small"))
 	}
 
-	innerW := m.width - 2
 	rightW := rightPanelWidth
-	if rightW > innerW/2 {
-		rightW = innerW / 2
+	if rightW > m.width/2 {
+		rightW = m.width / 2
 	}
-	leftW := innerW - rightW - 1 - 1 // 同 layout(): 含纵向分隔线 + 滚动条
-
-	bodyH := m.height - 5
+	leftW := m.width - rightW - 1 // 1 = 竖分隔线
+	if leftW < 1 {
+		leftW = 1
+	}
+	bodyH := m.height - inputAreaHeight
 	if bodyH < 1 {
 		bodyH = 1
 	}
 
-	header := m.renderHeader(innerW)
-	headerSep := dividerStyle.Render(strings.Repeat("─", innerW))
-
-	// chat + scrollbar 合成一个字符串,scrollbar 字符直接拼到每行末尾(不走 JoinHorizontal)。
-	//
-	// JoinHorizontal 做"按列对齐"会逐行测每列宽度,terminal 实际渲染宽度跟程序估算不一致时
-	// (emoji / ZWJ / box drawing 等字体相关字符),scrollbar 列会左右波动。改成"chat 字符 +
-	// scrollbar 字符"同行拼接后,scrollbar 永远紧贴 chat 字符流末尾,字符相对顺序由 ANSI 流
-	// 决定,不再依赖列宽对齐。物理上 chat 行宽仍可能波动,但视觉上 scrollbar 始终贴 chat。
+	// chat 区:pad/截到精确 leftW × bodyH。
 	chatPadded := padLinesToWidth(m.chatViewport.View(), leftW)
 	chatLines := strings.Split(chatPadded, "\n")
-	// 补 / 截到精确 bodyH 行
 	for len(chatLines) < bodyH {
 		chatLines = append(chatLines, strings.Repeat(" ", leftW))
 	}
 	if len(chatLines) > bodyH {
 		chatLines = chatLines[:bodyH]
 	}
-	scrollbarLines := strings.Split(m.renderScrollbar(bodyH), "\n")
-	for i := 0; i < bodyH && i < len(scrollbarLines); i++ {
-		chatLines[i] += scrollbarLines[i]
-	}
-	chatWithBar := strings.Join(chatLines, "\n")
 
-	// 输入框横跨 chat + 滚动条这两列,视觉上完整封底
-	var inpInner string
-	if m.inputAllSelected {
-		// 全选态: 自己渲染 prompt + 反色 value,代替 textinput.View()
-		// (textinput.View 会同时画光标/补 padding,不易精确套反色)
-		inpInner = m.input.Prompt + lipgloss.NewStyle().Reverse(true).Render(m.input.Value())
-	} else {
-		inpInner = m.input.View()
-	}
-	inp := lipgloss.NewStyle().
-		Width(leftW + 1).
-		Height(1).
-		MaxHeight(1).
-		Foreground(lipgloss.Color("15")).
-		Render(inpInner)
-	left := lipgloss.JoinVertical(lipgloss.Left, chatWithBar, inp)
-
-	totalH := bodyH + 1
-	divider := dividerStyle.Render(strings.TrimRight(strings.Repeat("│\n", totalH), "\n"))
-
+	// 右栏:status section 区,固定 rightW × bodyH。
 	right := lipgloss.NewStyle().
 		Width(rightW).
-		Height(totalH).
+		Height(bodyH).
 		Padding(0, 1).
 		Render(m.rightPanelView())
+	rightLines := strings.Split(right, "\n")
+	for len(rightLines) < bodyH {
+		rightLines = append(rightLines, strings.Repeat(" ", rightW))
+	}
+	if len(rightLines) > bodyH {
+		rightLines = rightLines[:bodyH]
+	}
 
-	body := lipgloss.JoinHorizontal(lipgloss.Top, left, divider, right)
-	inside := lipgloss.JoinVertical(lipgloss.Left, header, headerSep, body)
+	// 手动逐行拼接:chat_line + │ + right_line。
+	// 不走 lipgloss.JoinHorizontal — JoinHorizontal 按 lipgloss 测出的列宽对齐,而
+	// chat 行里的 emoji / 特殊字符(`🐚` `⛅` `°C` 等)在 ansi.StringWidth vs
+	// terminal 实际渲染之间可能差 1 cell,逐行差异导致 `│` 在某些行偏移、视觉上断开。
+	// 字符串拼接让 `│` 永远紧跟在 chat 最后一个字符之后,跟 chat 行内容流式衔接,
+	// 即使 chat 行实际宽度跟预期不一致,`│` 也连贯不断。
+	dividerStyleP := lipgloss.NewStyle().Foreground(bannerDecoColor)
+	dividerChar := dividerStyleP.Render("│")
+	bodyLines := make([]string, bodyH)
+	for i := 0; i < bodyH; i++ {
+		bodyLines[i] = chatLines[i] + dividerChar + rightLines[i]
+	}
+	body := strings.Join(bodyLines, "\n")
 
-	mainUI := outerStyle.Render(inside)
+	// 输入区:无边框,顶部留 1 行空白跟 body 视觉分开。textarea 自己渲染 prompt。
+	inpInner := m.input.View()
+	if m.inputAllSelected {
+		inpInner = lipgloss.NewStyle().Reverse(true).Render(inpInner)
+	}
+	inpBox := lipgloss.NewStyle().
+		Width(m.width).
+		Height(inputAreaHeight - 1).
+		MaxHeight(inputAreaHeight - 1).
+		Foreground(lipgloss.Color("15")).
+		Render(inpInner)
+	inputBlock := lipgloss.NewStyle().Width(m.width).Render("") + "\n" + inpBox
+
+	mainUI := lipgloss.JoinVertical(lipgloss.Left, body, inputBlock)
 
 	// 命令 palette:input value 以 "/" 起手时叠在输入框上方。
-	// 不影响 chat viewport 高度,只是视觉遮挡 chat 区底部最后几行(用户能继续滚动看)。
 	if matches := filterSlashCommands(m.input.Value()); len(matches) > 0 && !m.showSetup {
 		idx := m.commandPaletteIdx
 		if idx >= len(matches) {
@@ -127,26 +140,25 @@ func (m model) View() tea.View {
 			idx = 0
 		}
 		palette := renderCommandPalette(matches, idx, leftW)
-		// 输入框 Y = 外框顶 1 + header 1 + headerSep 1 + chat bodyH 行 = 3+bodyH
-		// palette 从 inputY - 行数 开始,左对齐到外框内 X=1
-		inputY := 3 + bodyH
+		// 输入框首行 Y = body(bodyH) + 1 行顶部空白
+		inputY := bodyH + 1
 		startY := inputY - len(matches)
-		if startY < 3 {
-			startY = 3 // 不进 header / 分隔线
+		if startY < 0 {
+			startY = 0
 		}
-		mainUI = overlayAt(mainUI, palette, 1, startY)
+		mainUI = overlayAt(mainUI, palette, 0, startY)
 	}
 
-	// modal 覆盖在主 UI 上居中显示,主 UI 仍可见(尤其首次启动让用户看到 deepx 的样子)
+	// modal 覆盖在主 UI 上居中显示。
 	if m.showSetup {
 		mainUI = overlayCentered(mainUI, m.setupModalBlock(), m.width, m.height)
 	}
 	if m.reviewPending {
 		mainUI = overlayCentered(mainUI, m.reviewBlock(), m.width, m.height)
 	}
-	// 锁到精确 m.width × m.height — Terminal.app 等终端对 ambiguous-width 字符 (◆/⏵ 等)
-	// 的渲染跟 lipgloss 估算可能不一致,行宽不齐会让 bubbletea 的 line-diff 跳行,
-	// 留下上一帧残影(右栏出现重复 section、滚动条断续)。强制 pad 到屏幕精确尺寸消除这一类。
+	if m.showLangModal {
+		mainUI = overlayCentered(mainUI, m.langModalBlock(), m.width, m.height)
+	}
 	return m.wrapView(normalizeFrame(mainUI, m.width, m.height))
 }
 
@@ -154,107 +166,24 @@ func (m model) View() tea.View {
 //   - 行数不够补空行(下方)
 //   - 行数过多截掉(尾部)
 //   - 每行宽度不够补空格,过宽用 ansi.Cut 切到精确 width
-// 用同一套 ansi.StringWidth 测量,让 bubbletea 的 diff 看到稳定的帧形状。
+//
+// 测量统一走 lineDisplayWidth(启动时按终端选 WcWidth / GraphemeWidth),跟 chat 行 pad
+// 用同一套口径,divider 才不会被推偏。
 func normalizeFrame(s string, width, height int) string {
 	lines := strings.Split(s, "\n")
-	// 截断或补足行数
 	if len(lines) > height {
 		lines = lines[:height]
 	}
 	for len(lines) < height {
 		lines = append(lines, "")
 	}
-	// 每行 pad/truncate 到精确 width
 	for i, ln := range lines {
-		w := ansi.StringWidth(ln)
+		w := lineDisplayWidth(ln)
 		switch {
 		case w < width:
 			lines[i] = ln + strings.Repeat(" ", width-w)
 		case w > width:
 			lines[i] = ansi.Cut(ln, 0, width)
-		}
-	}
-	return strings.Join(lines, "\n")
-}
-
-// renderHeader 顶部标题:左侧产品名,右侧 Endpoint URL。
-// 模型角色 / 模式 / 运行状态都移到右栏,header 留给静态信息(标题 + base_url)。
-func (m model) renderHeader(width int) string {
-	title := headerStyle.Render("deepx")
-
-	// 右侧只放 endpoint;头部空间有限,超长 host 头部截断,保留 host 末尾(更具识别性)
-	// 用 flash 的 base_url 当 header 默认显示;flash/pro 不同时,用户能在右栏看到差异。
-	endpoint := m.models.Flash.BaseURL
-	if endpoint == "" {
-		endpoint = m.models.Pro.BaseURL
-	}
-	maxEndpoint := width - lipgloss.Width(title) - 2
-	if maxEndpoint < 4 {
-		maxEndpoint = 4
-	}
-	if len(endpoint) > maxEndpoint {
-		endpoint = "…" + endpoint[len(endpoint)-(maxEndpoint-1):]
-	}
-	right := lipgloss.NewStyle().Foreground(subtleColor).Render(endpoint)
-
-	titleW := lipgloss.Width(title)
-	rightW := lipgloss.Width(right)
-
-	gap := width - titleW - rightW
-	if gap < 1 {
-		gap = 1
-	}
-	line := title + strings.Repeat(" ", gap) + right
-	return lipgloss.NewStyle().MaxWidth(width).Render(line)
-}
-
-// renderScrollbar 渲染 chat viewport 右侧的 1 列滚动条,高度等于 chat 区行数。
-// 内容不超一屏时整列留空(保持列宽稳定,不让左侧 chat 因为没滚动条而变宽再变窄,造成跳动)。
-//
-// **关键**:thumb 和 track 都用"空格 + Background 色"渲染 — 同一种字符占同样的 cell 宽。
-// 之前 track 曾用 `│` (U+2502) 字符,在 Terminal.app / 某些字体下被当 ambiguous-width 或
-// 行间距不齐,跟空格的实际宽度不一致,导致滚动条不同行左右偏移、整列看起来歪歪扭扭。
-// 用同一种字符(空格)就跟字形完全无关,任何字体 / 任何终端都是稳定 1 cell。
-func (m model) renderScrollbar(height int) string {
-	if height <= 0 {
-		return ""
-	}
-	total := m.chatViewport.TotalLineCount()
-	vis := m.chatViewport.VisibleLineCount()
-
-	lines := make([]string, height)
-	if total <= vis {
-		for i := range lines {
-			lines[i] = " "
-		}
-		return strings.Join(lines, "\n")
-	}
-
-	// 都是 Render(" "),lipgloss 把空格涂上 background 色,占满整 cell。
-	thumbStyle := lipgloss.NewStyle().Background(highlightColor)
-	trackStyle := lipgloss.NewStyle().Background(subtleColor)
-
-	thumbH := vis * height / total
-	if thumbH < 1 {
-		thumbH = 1
-	}
-	if thumbH > height {
-		thumbH = height
-	}
-	available := height - thumbH
-	thumbStart := int(m.chatViewport.ScrollPercent() * float64(available))
-	if thumbStart < 0 {
-		thumbStart = 0
-	}
-	if thumbStart > available {
-		thumbStart = available
-	}
-
-	for i := 0; i < height; i++ {
-		if i >= thumbStart && i < thumbStart+thumbH {
-			lines[i] = thumbStyle.Render(" ")
-		} else {
-			lines[i] = trackStyle.Render(" ")
 		}
 	}
 	return strings.Join(lines, "\n")
@@ -294,9 +223,9 @@ func statusIcon(s string) string {
 
 // reviewBlock 渲染审核确认弹窗。
 func (m model) reviewBlock() string {
-	title := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("11")).Render("⏳  Review Required")
+	title := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("11")).Render(T("review.title"))
 	desc := lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Render(
-		"Review " + m.reviewToolName + " " + truncateReviewArgs(m.reviewToolArgs, 40))
+		T("review.desc_prefix") + m.reviewToolName + " " + truncateReviewArgs(m.reviewToolArgs, 40))
 
 	yesStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
 	noStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
@@ -310,16 +239,71 @@ func (m model) reviewBlock() string {
 		"",
 		desc,
 		"",
-		yesStyle.Render("  [ YES ]"),
-		noStyle.Render("  [ NO  ]"),
+		yesStyle.Render(T("review.yes")),
+		noStyle.Render(T("review.no")),
 		"",
-		lipgloss.NewStyle().Foreground(subtleColor).Render("↑/↓ 选择 · Enter 确认 · Esc 拒绝"),
+		lipgloss.NewStyle().Foreground(subtleColor).Render(T("review.footer")),
 	)
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color("11")).
 		Padding(1, 2).
 		Width(45).
+		Render(content)
+}
+
+// versionLine 渲染右栏 banner 下方的版本行。
+// 默认显示 `v<current>`(暗色),如果检测到 GitHub 有更高版本则改成
+// `v<current> ↑ <latest>` 并把 ↑ 跟新版本染高亮色 — 视觉上是温和提示而非弹窗。
+// width 用来居中:右栏内宽 = rightPanelWidth-2,banner 居中,这里也居中对齐。
+func (m model) versionLine(width int) string {
+	cur := m.version
+	if cur == "" {
+		cur = "dev"
+	}
+	dim := lipgloss.NewStyle().Foreground(subtleColor).Render
+	hi := lipgloss.NewStyle().Foreground(highlightColor).Bold(true).Render
+
+	left := dim("v" + cur)
+	if m.updateAvailable && m.latestVersion != "" {
+		left = left + " " + hi("↑ "+m.latestVersion)
+	}
+	// 居中 pad,跟 banner 同一对齐
+	cellWidth := ansi.StringWidth(ansi.Strip(left))
+	if cellWidth >= width {
+		return left
+	}
+	pad := (width - cellWidth) / 2
+	return strings.Repeat(" ", pad) + left
+}
+
+// langModalBlock 渲染 /lang 语言选择弹窗。两项:中文 / 英文,langModalIdx 是当前光标。
+func (m model) langModalBlock() string {
+	title := lipgloss.NewStyle().Bold(true).Foreground(highlightColor).Render(T("lang.title"))
+
+	options := []string{T("lang.option.zh"), T("lang.option.en")}
+	rows := make([]string, 0, len(options))
+	for i, opt := range options {
+		marker := "  "
+		style := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+		if i == m.langModalIdx {
+			marker = "▸ "
+			style = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("10")).Background(lipgloss.Color("236"))
+		}
+		rows = append(rows, style.Render(marker+opt))
+	}
+
+	footer := lipgloss.NewStyle().Foreground(subtleColor).Render(T("lang.footer"))
+	parts := []string{title, ""}
+	parts = append(parts, rows...)
+	parts = append(parts, "", footer)
+	content := lipgloss.JoinVertical(lipgloss.Left, parts...)
+
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(highlightColor).
+		Padding(1, 2).
+		Width(42).
 		Render(content)
 }
 
@@ -331,18 +315,20 @@ func truncateReviewArgs(args string, max int) string {
 	return args[:max] + "…"
 }
 
+// rightPanelView 渲染右侧状态栏:Workspace / Models / Status / Usage / Commands / Plan。
+// 每段标题用 ◆ 前缀 + 大写,内容缩进 2 空格。section 之间留 1 行空行做视觉分隔。
 func (m model) rightPanelView() string {
 	label := lipgloss.NewStyle().Foreground(dimColor).Render
 	subtle := lipgloss.NewStyle().Foreground(subtleColor).Render
 
-	// 模型 id 太长时截断,避免把右栏挤变形
+	// 模型 id 太长就截断,避免把右栏挤变形
 	flashID := truncate(m.models.Flash.Model, rightPanelWidth-8)
 	proID := truncate(m.models.Pro.Model, rightPanelWidth-8)
 
 	// 路径压缩 ~/.../tail
 	cwd := abbreviatePath(m.workspace, rightPanelWidth-2)
 
-	// 本轮 elapsed:streaming 时实时 time.Since,idle 时用 stream done 时冻结的 turnElapsed
+	// 本轮 elapsed:streaming 时实时算,idle 时用 stream done 时冻结的 turnElapsed
 	var elapsed time.Duration
 	if m.streaming && !m.turnStartedAt.IsZero() {
 		elapsed = time.Since(m.turnStartedAt)
@@ -350,8 +336,7 @@ func (m model) rightPanelView() string {
 		elapsed = m.turnElapsed
 	}
 
-	// 活跃模型用 ▶ 直接标在 MODELS 行的左侧,不占额外行。
-	// 占位用两空格保持非活跃行的对齐。
+	// 活跃模型用 ▶ 标记。占位用两空格保持对齐。
 	arrowStyle := lipgloss.NewStyle().Foreground(highlightColor).Render("▶ ")
 	flashIndicator := "  "
 	proIndicator := "  "
@@ -362,14 +347,12 @@ func (m model) rightPanelView() string {
 		proIndicator = arrowStyle
 	}
 
-	// STATUS section: 给 idle/thinking/streaming 加 label,跟 mode 行对齐
-	statusLine := label("status") + " " +
-		lipgloss.NewStyle().Foreground(statusColor(m.status)).Render(m.status)
-	modeLine := label("mode  ") + " " +
+	statusLine := label(T("panel.label.status")) + " " +
+		lipgloss.NewStyle().Foreground(statusColor(m.status)).Render(T("status."+m.status))
+	modeLine := label(T("panel.label.mode")) + " " +
 		lipgloss.NewStyle().Foreground(highlightColor).Render(string(m.mode))
 
-	// section 是分组渲染 helper:标题用 ◆ 前缀 + 强调色加粗大写,内容缩进 2 空格,
-	// 结尾留一行空白当分组分隔。沿用 lipgloss 的 "section header + indented body" 模式。
+	// section 渲染助手:标题 + 缩进内容 + 末尾空行。
 	section := func(title string, body []string) []string {
 		out := make([]string, 0, len(body)+2)
 		out = append(out,
@@ -384,25 +367,50 @@ func (m model) rightPanelView() string {
 	}
 
 	rows := []string{}
-	// Workspace section:标题行尾接 session 哈希 (sha1(abs(wd))[:16],对应
-	// ~/.deepx/sessions/<hash>/ 目录)。不走 section() 助手是为了让哈希用
-	// subtle 暗色,而不是被 strings.ToUpper 大写化跟标题挤一起抢视觉权重。
+	// 5 行文字 logo:上 `/` 修饰条 + 3 行 deepx ascii art + 下 `/` 修饰条。
+	// 右栏宽 rightPanelWidth,Padding(0,1) 后内宽 rightPanelWidth-2,banner 渲到这个宽度。
+	bannerInnerW := rightPanelWidth - 2
+	if banner := renderBanner(bannerInnerW); banner != "" {
+		rows = append(rows, strings.Split(banner, "\n")...)
+	}
+
+	// 版本行紧贴 banner 下:`v0.1.0` 或 `v0.1.0 ↑ 0.2.0`(有新版本时高亮)。
+	rows = append(rows, m.versionLine(bannerInnerW), "")
+
+	// Endpoint section:api host(去 scheme / path)
+	endpoint := m.models.Flash.BaseURL
+	if endpoint == "" {
+		endpoint = m.models.Pro.BaseURL
+	}
+	if endpoint == "" {
+		endpoint = "(not set)"
+	}
+	host := endpoint
+	if idx := strings.Index(host, "://"); idx >= 0 {
+		host = host[idx+3:]
+	}
+	if idx := strings.IndexAny(host, "/?"); idx >= 0 {
+		host = host[:idx]
+	}
+	rows = append(rows, section(T("panel.endpoint"), []string{subtle(host)})...)
+
+	// Workspace section:标题尾接 session 哈希。不走 section() 是为了让哈希用 subtle 暗色。
 	workspaceTitle := lipgloss.NewStyle().Foreground(highlightColor).Render("◆ ") +
-		lipgloss.NewStyle().Foreground(accentColor).Bold(true).Render("WORKSPACE")
+		lipgloss.NewStyle().Foreground(accentColor).Bold(true).Render(strings.ToUpper(T("panel.workspace")))
 	if m.session != nil {
-		workspaceTitle += " " + subtle("("+m.session.SessionID()+")")
+		workspaceTitle += " " + subtle("("+m.session.SessionID()[:8]+")")
 	}
 	rows = append(rows, workspaceTitle, "  "+subtle(cwd), "")
-	rows = append(rows, section("Models", []string{
-		flashIndicator + label("flash ") + " " + flashID,
-		proIndicator + label("pro   ") + " " + proID,
+
+	rows = append(rows, section(T("panel.models"), []string{
+		flashIndicator + label(T("panel.label.flash")) + " " + flashID,
+		proIndicator + label(T("panel.label.pro")) + " " + proID,
 	})...)
-	rows = append(rows, section("Status", []string{
+	rows = append(rows, section(T("panel.status"), []string{
 		statusLine,
 		modeLine,
 	})...)
 	// 首轮 API 调用结束才能拿到 lastUsage,没拿到前用 "—" 占位,保持布局一致。
-	// cache 行始终显示,即便 0% 也比"突然消失一行"更稳。
 	// 分母用 PromptTokens 而非 hit+miss:DeepSeek API 保证 prompt_tokens = hit + miss,
 	// 但 hit/miss 是 DeepSeek 私有字段,兼容 OpenAI 的模型可能不返回,用 PromptTokens 更稳。
 	promptStr, outputStr, cacheStr := "—", "—", "—"
@@ -415,25 +423,26 @@ func (m model) rightPanelView() string {
 			cacheStr = "0% hit"
 		}
 	}
-	rows = append(rows, section("Usage", []string{
-		label("prompt") + " " + promptStr,
-		label("output") + " " + outputStr,
-		label("cache ") + " " + cacheStr,
-		label("time  ") + " " + formatElapsed(elapsed),
+	rows = append(rows, section(T("panel.usage"), []string{
+		label(T("panel.label.prompt")) + " " + promptStr,
+		label(T("panel.label.output")) + " " + outputStr,
+		label(T("panel.label.cache")) + " " + cacheStr,
+		label(T("panel.label.time")) + " " + formatElapsed(elapsed),
 	})...)
-	rows = append(rows, section("Commands", []string{
+	rows = append(rows, section(T("panel.commands"), []string{
 		label("/plan   ") + "Write/Bash off",
 		label("/auto   ") + "Write/Bash on",
 		label("/review ") + "Write/Bash ask",
+		label("/lang   ") + "zh / en",
 		label("/help   ") + "all cmds",
 	})...)
 
-	// 完整 plan 树在 chat 区显示,右栏只放进度摘要(X/Y done + 当前运行节点)。
+	// 完整 plan 树在 chat 区显示,右栏只放进度摘要。
 	if planLines := renderPlanSummary(m.plan, rightPanelWidth-4); len(planLines) > 0 {
-		rows = append(rows, section("Plan", planLines)...)
+		rows = append(rows, section(T("panel.plan"), planLines)...)
 	}
 
-	// 删掉最后那行多余的空行(每个 section 结尾都留了)
+	// 删掉最后那行多余空行
 	if len(rows) > 0 && rows[len(rows)-1] == "" {
 		rows = rows[:len(rows)-1]
 	}

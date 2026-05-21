@@ -72,21 +72,17 @@ func (m model) setupModalBlock() string {
 	title := lipgloss.NewStyle().
 		Bold(true).
 		Foreground(highlightColor).
-		Render("🐋 deepx — 配置 API Key")
+		Render(T("setup.title"))
 
 	var hint string
 	if m.setupRequired {
-		hint = "看起来这是首次启动。请粘贴你的 API key。\n" +
-			"配置会写入 ~/.deepx/model.yaml(权限 0600),之后启动不再询问。\n" +
-			"以后可直接编辑该文件,或在聊天中输入 /config 重开本面板。"
+		hint = T("setup.hint.first_run")
 	} else {
-		hint = "修改 API key — 旧值会被覆盖。\n" +
-			"提交后立即生效;Esc 取消不保存。\n" +
-			"如果你只想换 base_url / model id,直接编辑 ~/.deepx/model.yaml 重启即可。"
+		hint = T("setup.hint.reconfig")
 	}
 	hintBlock := lipgloss.NewStyle().Foreground(subtleColor).Render(hint)
 
-	inputLabel := lipgloss.NewStyle().Foreground(dimColor).Render("API key:")
+	inputLabel := lipgloss.NewStyle().Foreground(dimColor).Render(T("setup.input_label"))
 	inputBlock := inputLabel + "\n  " + m.setupInput.View()
 
 	var errBlock string
@@ -98,11 +94,9 @@ func (m model) setupModalBlock() string {
 
 	var footer string
 	if m.setupRequired {
-		footer = lipgloss.NewStyle().Foreground(dimColor).
-			Render("Enter 保存并继续 · Ctrl+C 退出 deepx")
+		footer = lipgloss.NewStyle().Foreground(dimColor).Render(T("setup.footer.first_run"))
 	} else {
-		footer = lipgloss.NewStyle().Foreground(dimColor).
-			Render("Enter 保存 · Esc 取消 · Ctrl+C 退出")
+		footer = lipgloss.NewStyle().Foreground(dimColor).Render(T("setup.footer.reconfig"))
 	}
 
 	parts := []string{title, "", hintBlock, "", inputBlock}
@@ -137,17 +131,17 @@ func (m model) setupModalBlock() string {
 func (m *model) submitSetup() tea.Cmd {
 	val := strings.TrimSpace(m.setupInput.Value())
 	if val == "" {
-		m.setupErr = "API key 不能为空"
+		m.setupErr = T("setup.error.empty")
 		return nil
 	}
 	cfg := config.Default(val)
 	if err := config.Save(cfg); err != nil {
-		m.setupErr = fmt.Sprintf("保存失败: %v", err)
+		m.setupErr = fmt.Sprintf(T("setup.error.save"), err)
 		return nil
 	}
 	loaded, err := config.Load()
 	if err != nil {
-		m.setupErr = fmt.Sprintf("重新加载失败: %v", err)
+		m.setupErr = fmt.Sprintf(T("setup.error.reload"), err)
 		return nil
 	}
 	m.models = agent.ModelConfig{
@@ -169,7 +163,7 @@ func (m *model) submitSetup() tea.Cmd {
 	m.input.Focus()
 
 	path, _ := config.Path()
-	m.appendChat("System", "✓ 已保存配置到 "+path)
+	m.appendChat("System", T("setup.saved_to")+path)
 	return nil
 }
 

@@ -12,7 +12,7 @@ func TestChatLogTrim(t *testing.T) {
 
 	// 5 段各 30 字节 = 150 > 100,应丢前 2 段保留后 3 段(共 90 字节)。
 	for range 5 {
-		cl.Open(strings.Repeat("x", 30))
+		cl.Open(kindAssistant, strings.Repeat("x", 30))
 	}
 	if got, want := len(cl.segments), 3; got != want {
 		t.Errorf("segments after trim = %d, want %d", got, want)
@@ -22,7 +22,7 @@ func TestChatLogTrim(t *testing.T) {
 	}
 
 	// 即使新段 200 字节(>预算),仍要保留这一段 — 永不裁尾。
-	cl.Open(strings.Repeat("y", 200))
+	cl.Open(kindUser, strings.Repeat("y", 200))
 	if got, want := len(cl.segments), 1; got != want {
 		t.Errorf("segments after huge open = %d, want %d (only the huge one kept)", got, want)
 	}
@@ -35,16 +35,17 @@ func TestChatLogTrim(t *testing.T) {
 // 而前面段的缓存仍然命中。这是流式渲染只重渲尾部的关键保证。
 func TestChatLogAppendInvalidatesTailCache(t *testing.T) {
 	cl := newChatLog(0) // 不限预算
-	cl.Open("first ")
-	cl.Open("second ")
+	cl.Open(kindUser, "first ")
+	cl.Open(kindAssistant, "second ")
 
 	renderCalls := 0
-	render := func(raw string, _ int) string {
+	render := func(raw, _ string, _ int) string {
 		renderCalls++
 		return "[" + raw + "]"
 	}
 
-	if got := cl.Render(80, render); got != "[first ][second ]" {
+	// 段之间渲染时会加 "\n\n" 分隔(1 行空行间距)。
+	if got := cl.Render(80, render); got != "[first ]\n\n[second ]" {
 		t.Fatalf("initial render = %q", got)
 	}
 	if renderCalls != 2 {
@@ -59,7 +60,7 @@ func TestChatLogAppendInvalidatesTailCache(t *testing.T) {
 
 	// Append 只动最后一段 → 只重渲它,第一段缓存仍复用。
 	cl.Append("extra")
-	if got := cl.Render(80, render); got != "[first ][second extra]" {
+	if got := cl.Render(80, render); got != "[first ]\n\n[second extra]" {
 		t.Fatalf("post-append render = %q", got)
 	}
 	if renderCalls != 3 {
@@ -79,12 +80,29 @@ func TestChatLogEndsWithNewline(t *testing.T) {
 	if cl.EndsWithNewline() {
 		t.Error("empty log should not report trailing newline")
 	}
-	cl.Open("abc")
+	cl.Open(kindAssistant, "abc")
 	if cl.EndsWithNewline() {
 		t.Error("non-newline-ending segment should not report trailing newline")
 	}
 	cl.Append("\n")
 	if !cl.EndsWithNewline() {
 		t.Error("after Append(\"\\n\") should report trailing newline")
+	}
+}
+
+// TestChatLogEnsureKind 验证 EnsureKind 在 kind 一致时不开新段,变化时开新段。
+func TestChatLogEnsureKind(t *testing.T) {
+	cl := newChatLog(0)
+	cl.EnsureKind(kindUser, "hi")
+	cl.EnsureKind(kindUser, "ignored") // 同 kind,不开新段
+	if got, want := len(cl.segments), 1; got != want {
+		t.Errorf("segments after same-kind EnsureKind = %d, want %d", got, want)
+	}
+	cl.EnsureKind(kindAssistant, "")
+	if got, want := len(cl.segments), 2; got != want {
+		t.Errorf("segments after switch kind = %d, want %d", got, want)
+	}
+	if got, want := cl.LastKind(), kindAssistant; got != want {
+		t.Errorf("LastKind = %q, want %q", got, want)
 	}
 }

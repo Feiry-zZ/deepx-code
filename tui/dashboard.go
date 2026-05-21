@@ -35,34 +35,38 @@ func padLinesToWidth(content string, w int) string {
 	return strings.Join(lines, "\n")
 }
 
-// lineDisplayWidth 测一行的显示宽度,**强制 emoji 一律算 2 cell**。
+// widthFunc 是运行时选定的宽度测量函数。不同终端对带 VS16 的 emoji 处理不同:
+//   - macOS Terminal.app:忽略 VS16,`🌦️` = 1 cell → 用 WcWidth
+//   - iTerm2 / WezTerm / Kitty / Ghostty:认 VS16,`🌦️` = 2 cell → 用 GraphemeWidth
 //
-// 跟 ansi.StringWidth 的差异:ansi 对默认 text-presentation 的 emoji(如 🖥 ⚙ 🗡 无 VS16)
-// 给 1 cell,但 macOS Terminal.app + Apple Color Emoji 字体把它们渲染成 emoji 形态
-// (~1.8-2 cell)。强制按 2 cell 算可以让程序估算更贴近终端实际渲染,改善 scrollbar /
-// divider 在含 emoji 行的偏移。
-//
-// 实现:先用 ansi.StringWidth 走 grapheme 标准度量,然后遍历 rune 找 emoji-like
-// 字符如果它单独被算 1 cell,补 1 修正到 2 cell。VS16 / ZWJ 等修饰符跳过避免重复加。
-func lineDisplayWidth(s string) int {
-	w := ansi.StringWidth(s)
-	stripped := ansi.Strip(s) // 不计 ANSI 转义里 ESC[ 字符,emoji 只在 visible 段内统计
-	runes := []rune(stripped)
-	for i := 0; i < len(runes); i++ {
-		r := runes[i]
-		if !isEmojiLike(r) {
-			continue
-		}
-		// 单独这个 emoji rune 在 ansi 度量下是 1 cell(text-presentation default 且无 VS16) → 补 1
-		if ansi.StringWidth(string(r)) == 1 {
-			// 若后跟 VS16,ansi 整段已算 2,跳过
-			if i+1 < len(runes) && runes[i+1] == 0xFE0F {
-				continue
-			}
-			w++
-		}
+// 启动时按 TERM_PROGRAM / 终端 env 变量选,匹配实际渲染行为,避免 divider 在含 emoji 的
+// 行被推偏。未知终端默认 WcWidth(更保守 — 多数终端不严格 honors VS16)。
+var widthFunc func(string) int = ansi.StringWidthWc
+
+func init() {
+	widthFunc = detectWidthFunc()
+}
+
+func detectWidthFunc() func(string) int {
+	switch os.Getenv("TERM_PROGRAM") {
+	case "Apple_Terminal":
+		return ansi.StringWidthWc
+	case "iTerm.app", "WezTerm", "ghostty", "vscode":
+		return ansi.StringWidth // GraphemeWidth 口径,认 VS16
 	}
-	return w
+	if os.Getenv("KITTY_WINDOW_ID") != "" {
+		return ansi.StringWidth
+	}
+	if os.Getenv("ALACRITTY_LOG") != "" || os.Getenv("ALACRITTY_WINDOW_ID") != "" {
+		return ansi.StringWidth
+	}
+	return ansi.StringWidthWc
+}
+
+// lineDisplayWidth 测一行的显示宽度,口径在启动时按终端选定(见 widthFunc / detectWidthFunc)。
+// 所有需要"跟终端实际渲染对齐"的地方(padLinesToWidth、normalizeFrame、scrollbar)都走这个。
+func lineDisplayWidth(s string) int {
+	return widthFunc(s)
 }
 
 // === Emoji presentation 修正 ===
@@ -105,22 +109,24 @@ func isEmojiLike(r rune) bool {
 	return false
 }
 
-// ensureEmojiSpacing 在 emoji 后紧跟非空白字符时插入一个空格,**只负责视觉分隔**。
+// ensureEmojiSpacing 处理 emoji 的两件事:
+//  1. 强制 emoji presentation(在 emoji 后插 VS16 U+FE0F)— 让 ansi.StringWidth /
+//     lipgloss / terminal 三方都把这个 emoji 算 2 cell,绕过 text-presentation default
+//     字符(如 ⛅ ☀ ⚙ ✂)在 Unicode 标准里算 1 cell 但 Terminal.app/iTerm2 实际渲染 2 cell
+//     的口径分歧。否则 divider / scrollbar 会在这类字符的行上偏移 1 cell。
+//  2. 视觉分隔(emoji 后紧跟非空白字符时补一个空格)。
 //
-// 宽度强制 emoji 2 cell 由 `lineDisplayWidth` 单独负责,这里不再插入 VS16
-// (避免跟 lineDisplayWidth 重复 / 冲突,也让字符流更干净)。
-//
-// 跳过情况:
-//   - emoji 后是 ZWJ (U+200D),emoji 组合序列内部不动 (例: 👨‍👩‍👧‍👦)
-//   - emoji 后是 VS16(LLM 原本就输出的 VS16),保留 VS16 然后看 VS16 后是否需要空格
-//   - emoji 后已经是空白,不重复补
+// 跳过插 VS16 的情况:
+//   - 后跟 ZWJ (U+200D):emoji 组合序列内部不动 (例: 👨‍👩‍👧‍👦)
+//   - 已经有 VS16:保留,不再重复
+//   - 已经有 VS15 (U+FE0E text presentation 选择符):尊重用户意图,不覆盖
 func ensureEmojiSpacing(s string) string {
 	if s == "" {
 		return s
 	}
 	runes := []rune(s)
 	var sb strings.Builder
-	sb.Grow(len(s) + 16)
+	sb.Grow(len(s) + 32)
 	for i := 0; i < len(runes); i++ {
 		r := runes[i]
 		sb.WriteRune(r)
@@ -128,15 +134,18 @@ func ensureEmojiSpacing(s string) string {
 			continue
 		}
 		if i+1 >= len(runes) {
+			// emoji 在串尾:补 VS16,无需空格
+			sb.WriteRune(0xFE0F)
 			continue
 		}
 		next := runes[i+1]
+		// ZWJ:跨 ZWJ 的组合序列,不动
 		if next == 0x200D {
 			continue
 		}
-		// LLM 自带的 VS16:原样保留,跳过 VS16 后再判断空格
-		if next == 0xFE0F {
-			sb.WriteRune(0xFE0F)
+		// 已有 VS16 / VS15:保留,推进游标到 selector 之后
+		if next == 0xFE0F || next == 0xFE0E {
+			sb.WriteRune(next)
 			i++
 			if i+1 >= len(runes) {
 				continue
@@ -147,7 +156,9 @@ func ensureEmojiSpacing(s string) string {
 			}
 			continue
 		}
-		// 无 VS16:只补空格,不主动注入 VS16
+		// 关键修复:插 VS16 强制 emoji presentation,让宽度测量跨工具一致
+		sb.WriteRune(0xFE0F)
+		// 再处理视觉分隔
 		if !isWhitespaceLike(next) {
 			sb.WriteRune(' ')
 		}
@@ -165,9 +176,8 @@ func isWhitespaceLike(r rune) bool {
 	return false
 }
 
-// ensureEmojiSpacingANSI 跟 ensureEmojiSpacing 同样目的(emoji 后强制空格),但 ANSI-aware。
-// 用在 glamour 渲染**之后**兜底:就算 glamour 内部 trim 了 emoji 后空格,这里也补回来。
-// 跟 ensureEmojiSpacing 一样,**只插空格不插 VS16**(宽度强制由 lineDisplayWidth 负责)。
+// ensureEmojiSpacingANSI 跟 ensureEmojiSpacing 同样目的(emoji 强制 emoji presentation
+// 并补视觉分隔空格),但 ANSI-aware:用在 glamour 渲染**之后**兜底,会跳过 ANSI 转义序列。
 func ensureEmojiSpacingANSI(s string) string {
 	if s == "" {
 		return s
@@ -214,15 +224,16 @@ func ensureEmojiSpacingANSI(s string) string {
 			continue
 		}
 		if i+1 >= len(runes) {
+			sb.WriteRune(0xFE0F)
 			continue
 		}
 		next := runes[i+1]
 		if next == 0x200D {
 			continue
 		}
-		if next == 0xFE0F {
-			// LLM 原本 VS16,保留,看其后是否需要空格
-			sb.WriteRune(0xFE0F)
+		if next == 0xFE0F || next == 0xFE0E {
+			// 已有 selector:保留,跳过后再判断是否要空格
+			sb.WriteRune(next)
 			i++
 			if i+1 >= len(runes) {
 				continue
@@ -233,7 +244,8 @@ func ensureEmojiSpacingANSI(s string) string {
 			}
 			continue
 		}
-		// 无 VS16:只补空格
+		// 关键修复:插 VS16 让宽度跨工具一致;再判断分隔空格
+		sb.WriteRune(0xFE0F)
 		if !isWhitespaceLike(next) {
 			sb.WriteRune(' ')
 		}

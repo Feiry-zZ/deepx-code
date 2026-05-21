@@ -26,7 +26,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "错误:", err)
 		os.Exit(1)
 	}
-	if err := tui.Run(toAgentConfig(cfg), needsSetup); err != nil {
+	if err := tui.Run(toAgentConfig(cfg), needsSetup, version); err != nil {
 		fmt.Fprintln(os.Stderr, "Error:", err)
 		os.Exit(1)
 	}

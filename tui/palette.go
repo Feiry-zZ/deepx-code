@@ -11,16 +11,19 @@ import (
 //
 // 顺序 = palette 默认展示顺序,跟 /help 列表保持一致(plan/auto 先,help 最后)。
 // 新增命令时记得三处同步:本表、handleSlashCommand 的 switch、/help 的提示文本。
-var slashCommands = []struct {
-	name, desc string
-}{
-	{"/plan", "切到只读模式"},
-	{"/auto", "切回全工具模式"},
-	{"/review", "切到审核模式"},
-	{"/mode", "显示当前模式"},
-	{"/config", "重新配置 API key"},
-	{"/skills", "列出可用 skill"},
-	{"/help", "帮助"},
+//
+// 用函数动态构建而非 package var,desc 走 T() 翻译,运行时切语言能反映到 palette。
+func slashCommands() []struct{ name, desc string } {
+	return []struct{ name, desc string }{
+		{"/plan", T("cmd.plan.desc")},
+		{"/auto", T("cmd.auto.desc")},
+		{"/review", T("cmd.review.desc")},
+		{"/mode", T("cmd.mode.desc")},
+		{"/config", T("cmd.config.desc")},
+		{"/skills", T("cmd.skills.desc")},
+		{"/lang", T("cmd.lang.desc")},
+		{"/help", T("cmd.help.desc")},
+	}
 }
 
 // filterSlashCommands 按当前 input value 前缀过滤候选。
@@ -37,8 +40,9 @@ func filterSlashCommands(input string) []struct{ name, desc string } {
 	if strings.ContainsAny(input, " \t") {
 		return nil
 	}
-	out := make([]struct{ name, desc string }, 0, len(slashCommands))
-	for _, c := range slashCommands {
+	cmds := slashCommands()
+	out := make([]struct{ name, desc string }, 0, len(cmds))
+	for _, c := range cmds {
 		if strings.HasPrefix(c.name, input) {
 			out = append(out, c)
 		}
