@@ -393,14 +393,11 @@ func initialModel(models agent.ModelConfig, needsSetup bool, version string, hub
 		m.input.Focus()
 	}
 
-	// web dashboard 启用时:把含 token 的完整 URL 复制到剪贴板,并在 chat 区给一条提示。
-	// 这样"复制"(自动进剪贴板,可粘贴)和"点击跳转"(右栏 OSC 8 超链接)两条路都通。
+	// web dashboard 启用时:把含 token 的完整 URL 复制到剪贴板(失败也无妨,地址就在提示里),
+	// 再在 chat 区给一条提示。复制后可直接粘贴,终端支持的话也能点提示里的链接跳转。
 	if webURL != "" {
-		copied := T("web.ready.nocopy")
-		if err := writeClipboardText(webURL); err == nil {
-			copied = T("web.ready.copied")
-		}
-		m.appendChat("System", fmt.Sprintf(T("web.ready"), webURL, copied))
+		_ = writeClipboardText(webURL)
+		m.appendChat("System", fmt.Sprintf(T("web.ready"), webURL))
 	}
 
 	// endpoint / 模型 / 模式信息全部移到右栏(rightPanelView 直接读 m.models / m.baseURL),
