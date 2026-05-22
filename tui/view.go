@@ -126,6 +126,28 @@ func (m model) View() tea.View {
 
 	mainUI := lipgloss.JoinVertical(lipgloss.Left, body, inputBlock)
 
+	// 复制成功提示:在鼠标松开的位置叠一个绿色"✓ 已复制"小标(copyHintClearMsg 到点清空)。
+	if m.copyHint != "" {
+		hint := lipgloss.NewStyle().Foreground(lipgloss.Color("0")).Background(lipgloss.Color("10")).Bold(true).
+			Render(" " + m.copyHint + " ")
+		hw := ansi.StringWidth(hint)
+		x := m.copyHintX + 1 // 紧贴松开点右边一点,不盖住光标
+		if x+hw > m.width {
+			x = m.width - hw // 贴右边界,别出屏
+		}
+		if x < 0 {
+			x = 0
+		}
+		y := m.copyHintY
+		if y < 0 {
+			y = 0
+		}
+		if y >= m.height {
+			y = m.height - 1
+		}
+		mainUI = overlayAt(mainUI, hint, x, y)
+	}
+
 	// 命令 palette:input value 以 "/" 起手时叠在输入框上方。
 	if matches := filterSlashCommands(m.input.Value()); len(matches) > 0 && !m.showSetup {
 		idx := m.commandPaletteIdx

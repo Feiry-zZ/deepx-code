@@ -295,6 +295,12 @@ var translations = map[string]map[Lang]string{
 		LangEN: "🎉 **New version available**: `v%s` → `v%s`\nUpgrade: %s",
 	},
 
+	// === 复制提示 ===
+	"copy.done": {
+		LangZH: "✓ 已复制",
+		LangEN: "✓ Copied",
+	},
+
 	// === Web dashboard ===
 	"web.ready": {
 		LangZH: "🌐 **Web Dashboard 已就绪**\n<%s>\n%s(终端支持的话可直接点上面的链接打开)",

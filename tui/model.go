@@ -106,6 +106,12 @@ type model struct {
 	// bubbletea v2 的 MouseClickMsg 不带 Clicks 计数,只能自己算。
 	lastInputClickAt time.Time
 
+	// copyHint 复制成功后的临时提示("✓ 已复制"),叠在鼠标松开的位置 (copyHintX/Y),
+	// 1.5s 后由 copyHintClearMsg 清空。空串 = 不显示。
+	copyHint  string
+	copyHintX int
+	copyHintY int
+
 	// 思考动画。streaming=true 且当前没在接收 content tokens 时,在 chat 末尾追加 spinner 帧。
 	// reasoning_content / tool_call 阶段都视为"思考中",content token 一到就停;
 	// 下一轮工具结果或新 reasoning 到来时再次开启,实现"多轮思考折叠成一个动画"。
@@ -500,7 +506,12 @@ func (m model) Init() tea.Cmd {
 	// textarea 的光标 blink 由 Focus() 返回,启动时一并发起。
 	// checkForUpgradeCmd 异步打 GitHub Releases API,完成后通过 upgradeCheckResult 回送 Update。
 	// cursorBlinkTick 自己驱动真实光标的明灭节奏。
-	return tea.Batch(textinput.Blink, m.input.Focus(), checkForUpgradeCmd(m.version), cursorBlinkTick())
+	cmds := []tea.Cmd{textinput.Blink, m.input.Focus(), checkForUpgradeCmd(m.version), cursorBlinkTick()}
+	// web 开启时,启动就把 dashboard 地址也通过 OSC52 写入剪贴板(pbcopy 已在 initialModel 里做了)。
+	if m.webURL != "" {
+		cmds = append(cmds, tea.SetClipboard(m.webURL))
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -662,11 +673,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.selecting {
-			text := m.collectSelectionText()
-			if text != "" {
-				_ = writeClipboardText(text)
+			// 双路写剪贴板(对齐 crush):pbcopy 本地必中,OSC52 兼容更多终端 + 跨 SSH。
+			// 不清 selecting:保留高亮,直到用户点别处 / 滚轮 / 改尺寸 / 开始新选择。
+			if cmd := m.copySelection(); cmd != nil {
+				// 记下松开位置,"✓ 已复制"提示就叠在这里。
+				m.copyHintX = msg.X
+				m.copyHintY = msg.Y
+				return m, cmd
 			}
-			// 不清 selecting:保留高亮,直到用户点别处 / 滚轮 / 改尺寸 / 开始新选择
 		}
 		return m, nil
 
@@ -1074,6 +1088,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// 决定要不要把光标塞进 tea.View.Cursor。继续返回下一拍 tick,自驱动。
 		m.cursorBlinkOff = !m.cursorBlinkOff
 		return m, cursorBlinkTick()
+
+	case copyHintClearMsg:
+		// "已复制"提示到点清空(View 下一帧就不显示了)。
+		m.copyHint = ""
+		return m, nil
 
 	case agent.HistoryUpdateMsg:
 		if m.streamCh == nil {

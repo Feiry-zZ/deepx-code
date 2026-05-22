@@ -2,7 +2,9 @@ package tui
 
 import (
 	"strings"
+	"time"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -32,6 +34,7 @@ func orderSel(a, b cellPos) (start, end cellPos) {
 const (
 	ansiReverseOn  = "\x1b[7m"
 	ansiReverseOff = "\x1b[27m"
+	ansiResetAll   = "\x1b[0m" // 进反色段前先全 reset,避免 pre 段未闭合的颜色渗入
 )
 
 // selRange 计算第 i 行的高亮 / 抠字列区间 [left, right):
@@ -82,9 +85,12 @@ func applySelectionHighlight(wrapped string, a, b cellPos, width int) string {
 			line += strings.Repeat(" ", width-cur)
 		}
 		pre := ansi.Cut(line, 0, left)
-		mid := ansi.Cut(line, left, right)
+		// 选中段必须 ansi.Strip 成纯文本再套反色:mid 里(markdown / URL 渲染)常带
+		// `\x1b[0m` 全 reset,它会把前面的 `\x1b[7m` 反色一起取消 → 选中文字看起来没高亮。
+		// 去掉内部 SGR 后整段都是反色实心块(编辑器式选区),前面补一个 reset 防 pre 的颜色渗进来。
+		mid := ansi.Strip(ansi.Cut(line, left, right))
 		post := ansi.Cut(line, right, width)
-		lines[i] = pre + ansiReverseOn + mid + ansiReverseOff + post
+		lines[i] = pre + ansiResetAll + ansiReverseOn + mid + ansiReverseOff + post
 	}
 	return strings.Join(lines, "\n")
 }
@@ -122,6 +128,26 @@ func extractSelectionText(wrapped string, a, b cellPos, width int) string {
 		out = append(out, seg)
 	}
 	return strings.Join(out, "\n")
+}
+
+// copySelection 把当前选区文本双路写剪贴板:pbcopy(本地必中)+ OSC52(兼容更多终端 / SSH)。
+// 同时弹一个"已复制"临时提示。选区为空返回 nil。
+func (m *model) copySelection() tea.Cmd {
+	text := m.collectSelectionText()
+	if text == "" {
+		return nil
+	}
+	_ = writeClipboardText(text)
+	m.copyHint = T("copy.done")
+	return tea.Batch(tea.SetClipboard(text), clearCopyHintCmd())
+}
+
+// copyHintClearMsg 到达时清掉"已复制"提示。
+type copyHintClearMsg struct{}
+
+// clearCopyHintCmd 1.5s 后发 copyHintClearMsg。
+func clearCopyHintCmd() tea.Cmd {
+	return tea.Tick(1500*time.Millisecond, func(time.Time) tea.Msg { return copyHintClearMsg{} })
 }
 
 // stripQuoteBarPrefix 移除 applyQuoteBar 加的左侧色条前缀。
