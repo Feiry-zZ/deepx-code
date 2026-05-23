@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -82,6 +83,17 @@ func fetchLatestRelease() (string, string, error) {
 		return "", "", err
 	}
 	return strings.TrimPrefix(rel.TagName, "v"), rel.HTMLURL, nil
+}
+
+// upgradeCommand 返回当前平台的一键升级指令。升级方式就是重跑安装脚本 —— 它从 GitHub
+// Releases 拉最新预编译二进制覆盖安装。URL 由 repo 常量拼出,fork 改 githubRepoOwner /
+// githubRepoName 即可同步。Windows 走 PowerShell(install.ps1),其余(macOS/Linux)走 bash。
+func upgradeCommand() string {
+	base := fmt.Sprintf("https://raw.githubusercontent.com/%s/%s/main/scripts", githubRepoOwner, githubRepoName)
+	if runtime.GOOS == "windows" {
+		return fmt.Sprintf("irm %s/install.ps1 | iex", base)
+	}
+	return fmt.Sprintf("curl -fsSL %s/install.sh | bash", base)
 }
 
 // versionNewer 比较两个语义化版本字符串(已去 v 前缀,允许后缀 -rc1 / -beta 等)。
