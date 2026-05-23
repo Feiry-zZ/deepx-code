@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"deepx/agent"
+	"deepx/mcp"
 	"deepx/session"
 	"deepx/skill"
 	"deepx/tools"
@@ -146,6 +147,16 @@ type model struct {
 	showLangModal bool
 	langModalIdx  int
 
+	// MCP:mcpMgr 管理外部 MCP server 连接与工具注入(启动时后台连接配置里的 server)。
+	// /mcp-add 弹单行输入框(格式 "名称 命令 [参数...]");/mcp-delete 弹 server 列表选删。
+	mcpMgr        *mcp.Manager
+	showMcpAdd    bool
+	mcpAddInput   textinput.Model
+	mcpAddErr     string
+	showMcpDelete bool
+	mcpDelNames   []string
+	mcpDelIdx     int
+
 	// 版本信息。version 是 build 时注入的当前版本号(go build 默认 "dev")。
 	// latestVersion 是异步检查得到的 GitHub latest release,空则没检查到 / 网络失败。
 	// upgradeAvailable 由 versionNewer(latestVersion, version) 算出,渲染时用来决定是否
@@ -239,6 +250,11 @@ func initialModel(models agent.ModelConfig, needsSetup bool, version string, hub
 	si.CharLimit = 256
 	si.SetWidth(50)
 
+	mi := textinput.New()
+	mi.Placeholder = "名称 命令 [参数...]"
+	mi.CharLimit = 512
+	mi.SetWidth(54)
+
 	// 起手角色 = flash (若 flash 未配置则退化到 pro)
 	role := "flash"
 	activeID := models.Flash.Model
@@ -276,7 +292,14 @@ func initialModel(models agent.ModelConfig, needsSetup bool, version string, hub
 	// 代码图谱:绑定到当前 workspace 根,懒构建(首次 CodeGraph 调用时才遍历解析)。
 	tools.SetCodeGraphRoot(wd)
 
+	// MCP:后台连接 ~/.deepx/mcp.json 里配置的 server,连上后把它们的工具注入给 LLM。
+	// 失败只记状态、不影响启动;没配置则什么都不做。
+	mcpMgr := mcp.NewManager()
+	mcpMgr.ConnectAll()
+
 	m := model{
+		mcpMgr:          mcpMgr,
+		mcpAddInput:     mi,
 		chatContent:     newChatLog(maxChatBytes),
 		currentReply:    &strings.Builder{},
 		chatViewport:    vp,
@@ -700,6 +723,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.setupInput, c = m.setupInput.Update(msg)
 			return m, c
 		}
+		// mcp-add modal 期间,转发给 mcpAddInput(允许粘贴命令)
+		if m.showMcpAdd {
+			var c tea.Cmd
+			m.mcpAddInput, c = m.mcpAddInput.Update(msg)
+			return m, c
+		}
 		// 空 paste 内容 = 终端有 paste 事件但 PTY 里没文本 → 大概率剪贴板只有图片,主动读 PNG。
 		// 非空 paste 内容 = 普通文本粘贴,放掉让 textinput 自己接(它有 PasteMsg 处理)。
 		if msg.Content == "" {
@@ -782,6 +811,50 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			case "esc", "ctrl+c":
 				m.showLangModal = false
+				return m, nil
+			}
+			return m, nil
+		}
+
+		// /mcp-add modal:单行输入,Enter 保存连接,Esc 取消
+		if m.showMcpAdd {
+			switch msg.String() {
+			case "ctrl+c":
+				return m, tea.Quit
+			case "enter":
+				m.submitMcpAdd()
+				return m, nil
+			case "esc":
+				m.showMcpAdd = false
+				m.mcpAddErr = ""
+				m.mcpAddInput.Blur()
+				m.input.Focus()
+				return m, nil
+			}
+			var c tea.Cmd
+			m.mcpAddInput, c = m.mcpAddInput.Update(msg)
+			return m, c
+		}
+
+		// /mcp-delete modal:↑/↓ 选,Enter 删,Esc 取消
+		if m.showMcpDelete {
+			switch msg.String() {
+			case "up", "k":
+				if m.mcpDelIdx > 0 {
+					m.mcpDelIdx--
+				}
+				return m, nil
+			case "down", "j":
+				if m.mcpDelIdx < len(m.mcpDelNames)-1 {
+					m.mcpDelIdx++
+				}
+				return m, nil
+			case "enter":
+				m.submitMcpDelete()
+				return m, nil
+			case "esc", "ctrl+c":
+				m.showMcpDelete = false
+				m.input.Focus()
 				return m, nil
 			}
 			return m, nil
@@ -1555,6 +1628,12 @@ func (m *model) handleSlashCommand(input string) {
 		m.openSetupModal()
 	case "/skills":
 		m.appendChat("assistant", m.skillsListMessage())
+	case "/mcp-list":
+		m.appendChat("System", m.mcpListMessage())
+	case "/mcp-add":
+		m.openMcpAddModal()
+	case "/mcp-delete":
+		m.openMcpDeleteModal()
 	case "/lang":
 		m.showLangModal = true
 		// 默认光标停在当前语言上

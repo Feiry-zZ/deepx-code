@@ -89,6 +89,18 @@ var translations = map[string]map[Lang]string{
 		LangZH: "列出可用 skill",
 		LangEN: "List available skills",
 	},
+	"cmd.mcp-list.desc": {
+		LangZH: "列出 MCP server 及状态",
+		LangEN: "List MCP servers & status",
+	},
+	"cmd.mcp-add.desc": {
+		LangZH: "添加 MCP server（弹窗）",
+		LangEN: "Add an MCP server (popup)",
+	},
+	"cmd.mcp-delete.desc": {
+		LangZH: "删除 MCP server（弹窗）",
+		LangEN: "Delete an MCP server (popup)",
+	},
 	"cmd.lang.desc": {
 		LangZH: "切换语言 / Switch language",
 		LangEN: "Switch language / 切换语言",
@@ -107,6 +119,7 @@ var translations = map[string]map[Lang]string{
 			"- `/mode` — 显示当前模式\n" +
 			"- `/config` — 重新配置 API key (覆盖 `~/.deepx/model.yaml`)\n" +
 			"- `/skills` — 列出可用 skill\n" +
+			"- `/mcp-list` `/mcp-add` `/mcp-delete` — 管理 MCP server\n" +
 			"- `/lang` — 切换语言 (中/英)\n" +
 			"- `/help` — 帮助\n\n" +
 			"**快捷键**\n\n" +
@@ -122,6 +135,7 @@ var translations = map[string]map[Lang]string{
 			"- `/mode` — Show current mode\n" +
 			"- `/config` — Reconfigure API key (overwrites `~/.deepx/model.yaml`)\n" +
 			"- `/skills` — List available skills\n" +
+			"- `/mcp-list` `/mcp-add` `/mcp-delete` — Manage MCP servers\n" +
 			"- `/lang` — Switch language (zh/en)\n" +
 			"- `/help` — Help\n\n" +
 			"**Keybindings**\n\n" +

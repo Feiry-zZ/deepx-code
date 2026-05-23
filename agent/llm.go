@@ -663,6 +663,11 @@ func buildToolSpecs(mode AgentMode, role string) []tools.OpenAIToolSpec {
 		}
 		out = append(out, t.ToOpenAISpec())
 	}
+	// 动态注入的 MCP 工具:对所有角色可见(子 agent 也能用)。放在内置工具之后,
+	// 保持内置工具的前缀稳定(MCP 工具变动不影响内置部分的 KV cache)。
+	for _, t := range tools.MCPTools() {
+		out = append(out, t.ToOpenAISpec())
+	}
 	return out
 }
 

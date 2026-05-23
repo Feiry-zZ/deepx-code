@@ -66,14 +66,14 @@ func (t Tool) ToOpenAISpec() OpenAIToolSpec {
 	}
 }
 
-// Find 按名查找工具，找不到返回 nil。
+// Find 按名查找工具，找不到返回 nil。先查静态工具，再兜底查动态注入的 MCP 工具。
 func Find(name string) *Tool {
 	for i := range Tools {
 		if Tools[i].Name == name {
 			return &Tools[i]
 		}
 	}
-	return nil
+	return findMCPTool(name)
 }
 
 // ParseArgs 把 LLM 返回的 JSON 字符串参数解析成 map。
