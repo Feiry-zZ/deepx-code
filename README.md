@@ -1,42 +1,35 @@
 # deepx
 
-> 本地优先的 AI 编码 agent —— 完整上下文恢复、零延迟路由、DeepSeek 缓存原生友好。
-
-AI 代码助手，Go 实现的终端应用，对接任何 OpenAI Chat Completions 兼容 API，默认适配 DeepSeek。
+> 本地优先的 AI 编码 agent —— 完整上下文恢复、零延迟路由、代码图谱导航、DeepSeek 缓存原生友好。
 
 ![deepx screenshot](assets/screenshot.jpg)
 
 ## 为什么选 deepx
 
-| 痛点（主流 agent）         | deepx 的解法                                                                             |
-| :------------------------- | :--------------------------------------------------------------------------------------- |
-| 重启丢上下文，只恢复纯文本 | **gob 二进制持久化**：tool_calls、tool results、reasoning_content 全部保留，LLM 无缝续接 |
-| LLM 路由慢、费 token       | **本地关键词路由**：零延迟、零 token 消耗，命中直接升 pro                                |
-| DeepSeek 缓存频繁 miss     | **tools 数组恒定** + **system prompt 版本感知**：跨回合前缀稳定                          |
-| 多步任务要手动排队         | **Plan DAG 并发调度**：按依赖关系并行跑子 agent，每个节点独立选模型                      |
-| 长对话撑爆窗口             | **分层压缩 + 旧摘要合并**：LLM 看连贯摘要而非碎片                                        |
-| 图片发不了给 DeepSeek      | **本地 OCR**（PaddleOCR PP-OCRv5）：离线识别，不依赖多模态 API                           |
+- 🚀 golang开发，小巧快速，全平台覆盖。
+- 🚀 gob二进制持久化。tool_calls、tool results、reasoning_content 全部保留，LLM 无缝续接
+- 🚀 分层压缩 + 旧摘要合并
+- 🚀 支持skill，MCP
+- 🚀 本地关键词路由。零延迟、零 token 消耗，命中直接升 pro
+- 🚀 自动模型切换。根据问题复杂度，自动升级为pro模型
+- 🚀 Plan DAG 并发调度。按依赖关系并行跑子 agent，每个节点独立选模型
+- 🚀 本地OCR(PaddleOCR)。离线识别，不依赖多模态 API
+- 🚀 代码图谱(codeGraph)。极大减少read,glob,grep token浪费
 
 ## 快速开始
 
 ### 安装
 
+- macOS / Linux
+
 ```bash
-# macOS / Linux
 curl -fsSL https://raw.githubusercontent.com/itmisx/deepx-code/main/scripts/install.sh | bash
 ```
 
+- Windows (PowerShell)
+
 ```bash
-# Windows (PowerShell)
 irm https://raw.githubusercontent.com/itmisx/deepx-code/main/scripts/install.ps1 | iex
-```
-
-### 源码构建
-
-```bash
-git clone https://github.com/itmisx/deepx-code.git
-cd deepx-code
-go build .        # 需要 Go 1.25+
 ```
 
 ### 使用
@@ -128,11 +121,22 @@ PlanCreated
 
 Ctrl+V 粘贴图片 → deepx 自动落盘 → LLM 通过 `OCR` 工具（PaddleOCR PP-OCRv5）识别图片中的文字。首次自动下载 ~37MB 模型，后续秒级响应。**DeepSeek 不支持多模态，本地 OCR 补齐最大短板。**
 
+### 代码图谱
+
+deepx 内置代码图谱，模型可以直接「跳到定义、找谁调用了某函数、查某接口被哪些类型实现、估算改动一个符号会牵连到哪些下游」，不用满仓库 grep + 一个个翻文件 —— 更准、更省 token。
+
+- 覆盖 **Go 及 20+ 主流语言**（TypeScript / JavaScript / Python / Java / Rust / C / C++ / C# / Ruby / PHP / Kotlin / Swift / Scala / Dart 等）。
+- Go 还能**精确到隐式接口实现**（"谁实现了这个接口"——这是文本搜索查不出来的）。
+- 开机后台预建索引、改文件自动失效重建；无结果时会如实说明覆盖边界，不会误导。
+
+启用后右栏状态区会显示「代码图谱」的就绪状态与调用次数。
+
 ## 工具集
 
 | 类型     | 工具                               |         plan | auto | review |
 | :------- | :--------------------------------- | -----------: | :--: | :----: |
 | 文件只读 | `Read` `List` `Tree` `Glob` `Grep` |            ✓ |  ✓   |   ✓    |
+| 代码图谱 | `CodeGraph`                        |            ✓ |  ✓   |   ✓    |
 | 文件写入 | `Write` `Update`                   |            ✗ |  ✓   |   ⏳   |
 | Shell    | `Bash`                             |            ✗ |  ✓   |   ⏳   |
 | 联网     | `Search` `Fetch`                   |            ✓ |  ✓   |   ✓    |
@@ -207,7 +211,8 @@ deepx/
 ├── agent/          StartStream 工具循环 + 路由 + DAG 调度 + 子 agent
 ├── config/         ~/.deepx/model.yaml 读写
 ├── session/        gob 持久化 + JSONL 日志 + 会话压缩状态
-├── tools/          全部工具实现（读写/搜索/OCR/Memory/Skill/Plan）
+├── tools/          全部工具实现（读写/搜索/OCR/Memory/Skill/Plan/CodeGraph）
+├── codegraph/      代码图谱：跳定义 / 找调用 / 继承实现 / 影响面
 ├── skill/          多路径 skill 发现与加载
 ├── ocr/            PaddleOCR 包装（ONNX Runtime）
 ├── tui/            bubbletea TUI（输入/渲染/剪贴板/选中/仪表盘）
