@@ -172,6 +172,38 @@ var translations = map[string]map[Lang]string{
 		LangZH: "未知命令: %s (输入 /help 查看)",
 		LangEN: "Unknown command: %s (type /help for help)",
 	},
+	"model.locked": {
+		LangZH: "已锁定 %s 模型（本会话不再自动路由，也不会被自动升级）。",
+		LangEN: "Locked to the %s model (no auto-routing or auto-upgrade this session).",
+	},
+	"model.unlocked": {
+		LangZH: "已切换为自动选择模型（按任务关键词路由 flash/pro）。",
+		LangEN: "Switched to automatic model selection (routed flash/pro by task).",
+	},
+	"model.modal.title": {
+		LangZH: "选择模型",
+		LangEN: "Select model",
+	},
+	"model.opt.auto": {
+		LangZH: "auto   — 按任务自动路由 flash / pro",
+		LangEN: "auto   — route flash / pro by task",
+	},
+	"model.opt.flash": {
+		LangZH: "flash  — 锁定 flash（快、省）",
+		LangEN: "flash  — pin flash (fast, cheap)",
+	},
+	"model.opt.pro": {
+		LangZH: "pro    — 锁定 pro（强、贵）",
+		LangEN: "pro    — pin pro (stronger, pricier)",
+	},
+	"model.footer": {
+		LangZH: "↑/↓ 选择 · Enter 确认 · Esc 取消",
+		LangEN: "↑/↓ select · Enter confirm · Esc cancel",
+	},
+	"cmd.model.desc": {
+		LangZH: "锁定/自动选择模型 (auto|flash|pro)",
+		LangEN: "Pin/auto-select model (auto|flash|pro)",
+	},
 
 	// === Right panel section titles ===
 	// 注:section() 会 strings.ToUpper(title) — 对英文是大写化,对中文是 no-op,两边都能用。

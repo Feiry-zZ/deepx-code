@@ -405,6 +405,7 @@ func StartStream(
 	workspace string,
 	skillCatalog string, // 见下方 system prompt 注入逻辑;空串表示当前没有 skill
 	summary string, // 会话压缩摘要,垫在 system prompt 末尾;空串表示尚未压缩
+	forceRole string, // 用户锁定的模型角色("flash"/"pro");空串或 "auto" 表示走关键词路由
 ) (tea.Cmd, <-chan tea.Msg) {
 	ch := make(chan tea.Msg, 128)
 
@@ -437,15 +438,25 @@ func StartStream(
 			role = tools.RolePro
 		}
 
-		// 入口路由:纯本地关键词 + 长度判定,零延迟,无 LLM 调用。
-		// 命中复杂关键词 / 消息 > 500 字 → pro;否则 flash。
-		// 本轮锁定该模型,主循环不再切换 — plan 节点可独立指定 model 字段,
-		// 由 sub-agent 按节点要求路由,跟"起手模型"解耦。
-		if latestUserTask != "" && models.Pro.Model != "" {
-			choice := RouteByKeyword(latestUserTask)
-			if choice == "pro" {
-				role = tools.RolePro
-				currentEntry = models.Pro
+		// 起手模型选择:
+		//   - forceRole=flash/pro:用户用 /model 锁定,直接定死,绕过关键词路由;
+		//   - 否则(""/auto):入口关键词路由(纯本地、零延迟、无 LLM)——命中复杂关键词 /
+		//     消息 > 500 字 → pro,否则 flash。
+		// 无论哪种,本轮锁定该模型,主循环不再自动切换。
+		switch forceRole {
+		case tools.RoleFlash:
+			if models.Flash.Model != "" {
+				role, currentEntry = tools.RoleFlash, models.Flash
+			}
+		case tools.RolePro:
+			if models.Pro.Model != "" {
+				role, currentEntry = tools.RolePro, models.Pro
+			}
+		default:
+			if latestUserTask != "" && models.Pro.Model != "" {
+				if RouteByKeyword(latestUserTask) == "pro" {
+					role, currentEntry = tools.RolePro, models.Pro
+				}
 			}
 		}
 		ch <- ModelSwitchMsg{Role: role, ModelID: currentEntry.Model}
@@ -615,7 +626,13 @@ func StartStream(
 					// 单向升级到 pro。已经在 pro 是 no-op,flash → pro 实际换 currentEntry。
 					// 切换立即生效:本轮工具循环下一次 streamOnce 用新 entry。
 					reason := parseSwitchModelReason(tc.Function.Arguments)
-					if role == tools.RolePro {
+					if forceRole == tools.RoleFlash {
+						// 用户用 /model flash 锁定,模型无权越权升级。
+						result = tools.ToolResult{
+							Output:  "用户已锁定 flash 模型(/model flash),忽略本次升级,继续用 flash 完成任务。",
+							Success: true,
+						}
+					} else if role == tools.RolePro {
 						result = tools.ToolResult{
 							Output:  "已经在 pro 模型,无需切换。继续完成任务即可。",
 							Success: true,

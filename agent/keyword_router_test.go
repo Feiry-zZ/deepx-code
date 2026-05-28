@@ -32,6 +32,20 @@ func TestRouteByKeyword(t *testing.T) {
 		// 大小写不敏感
 		{"uppercase-en", "REFACTOR THE CODE", "pro"},
 		{"mixed-case", "Debug this issue", "pro"},
+
+		// 假阳性过滤:命中关键词但是求知 / 问答句式 → 降回 flash
+		{"zh-what-is-refactor", "什么是重构？", "flash"},
+		{"zh-explain-arch", "解释一下架构设计", "flash"},
+		{"zh-suffix-what", "这个项目的架构是什么", "flash"},
+		{"en-how-to-debug", "how to debug a goroutine leak", "flash"},
+		{"en-what-is", "what is refactoring", "flash"},
+		{"en-explain", "explain the architecture here", "flash"},
+
+		// 任务句式即使含关键词 → 维持 pro(不被误降级)
+		{"zh-cmd-refactor", "帮我重构这个函数", "pro"},
+		{"zh-cmd-design", "设计一个登录流程", "pro"},
+		{"zh-cmd-research", "调研一下这个库并给出方案", "pro"},
+		{"en-cmd-refactor-explain", "refactor the auth module and explain", "pro"},
 	}
 
 	for _, c := range cases {

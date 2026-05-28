@@ -18,6 +18,7 @@ func slashCommands() []struct{ name, desc string } {
 		{"/plan", T("cmd.plan.desc")},
 		{"/auto", T("cmd.auto.desc")},
 		{"/review", T("cmd.review.desc")},
+		{"/model", T("cmd.model.desc")},
 		{"/mode", T("cmd.mode.desc")},
 		{"/config", T("cmd.config.desc")},
 		{"/skills", T("cmd.skills.desc")},
@@ -28,6 +29,21 @@ func slashCommands() []struct{ name, desc string } {
 		{"/compact", T("cmd.compact.desc")},
 		{"/help", T("cmd.help.desc")},
 	}
+}
+
+// isExactSlashCommand 判断 input 的首 token 是否精确等于某个已知命令名
+// (用于支持带参数的命令,如 "/model flash" —— 首 token "/model" 精确命中即按命令处理)。
+func isExactSlashCommand(input string) bool {
+	fields := strings.Fields(strings.ToLower(strings.TrimSpace(input)))
+	if len(fields) == 0 {
+		return false
+	}
+	for _, c := range slashCommands() {
+		if c.name == fields[0] {
+			return true
+		}
+	}
+	return false
 }
 
 // filterSlashCommands 按当前 input value 前缀过滤候选。
@@ -141,4 +157,3 @@ func overlayAt(bg, fg string, startX, startY int) string {
 	}
 	return strings.Join(bgLines, "\n")
 }
-

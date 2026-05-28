@@ -18,6 +18,11 @@ func RouteByKeyword(userMsg string) string {
 		// 关键词本身已经是小写或 CJK(CJK 无大小写概念),
 		// 用 Contains 即可正确匹配;不做边界检测以保持简单。
 		if strings.Contains(lower, kw) {
+			// 命中复杂关键词只是"必要条件":若整句是求知 / 问答句式
+			// (什么是 X / how to X / X 是什么 等),属问答而非任务,降回 flash 省钱。
+			if isLearningQuery(lower) {
+				return "flash"
+			}
 			return "pro"
 		}
 	}
@@ -30,6 +35,44 @@ func RouteByKeyword(userMsg string) string {
 		return "pro"
 	}
 	return "flash"
+}
+
+// isLearningQuery 判断消息是否为"求知 / 问答"句式(而非任务指令)。
+// 仅用锚定在句首 / 句尾的前缀、后缀匹配明确的问法,避免把任务误降级;入参为已小写化的消息。
+// 取舍:"how to / 怎么 / 如何"这类略有歧义的也算问答,偏向降级 flash 省钱 ——
+// 真需要 pro 时用户可手动指定,或模型在执行中自行 SwitchModel 升级。
+func isLearningQuery(lower string) bool {
+	s := strings.TrimRight(strings.TrimSpace(lower), " \t　?？!！。.~")
+	for _, p := range learningPrefixes {
+		if strings.HasPrefix(s, p) {
+			return true
+		}
+	}
+	for _, suf := range learningSuffixes {
+		if strings.HasSuffix(s, suf) {
+			return true
+		}
+	}
+	return false
+}
+
+// learningPrefixes:出现在句首即视为问答。多语言覆盖,英文为小写。
+var learningPrefixes = []string{
+	// 中文
+	"什么是", "为什么", "为何", "怎么", "如何", "解释", "介绍", "啥是",
+	// 英文
+	"what is", "what are", "what's", "what does", "what do",
+	"how to", "how do", "how does", "how can", "why ",
+	"explain", "tell me about", "can you explain",
+	// 日文 / 韩文
+	"なぜ", "왜 ",
+}
+
+// learningSuffixes:出现在句尾即视为问答(中日韩疑问后置)。
+var learningSuffixes = []string{
+	"是什么", "是啥", "怎么用", // 中文
+	"とは", "って何", "説明して", // 日文
+	"란", "이란", "설명해", // 韩文
 }
 
 // complexKeywords 触发 pro 路由的关键词列表。

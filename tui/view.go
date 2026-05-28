@@ -224,6 +224,9 @@ func (m model) View() tea.View {
 	if m.showLangModal {
 		mainUI = overlayCentered(mainUI, m.langModalBlock(), m.width, m.height)
 	}
+	if m.showModelModal {
+		mainUI = overlayCentered(mainUI, m.modelModalBlock(), m.width, m.height)
+	}
 	if m.showMcpAdd {
 		mainUI = overlayCentered(mainUI, m.mcpAddModalBlock(), m.width, m.height)
 	}
@@ -445,6 +448,36 @@ func (m model) langModalBlock() string {
 		Render(content)
 }
 
+// modelModalBlock 渲染 /model 选择弹窗。三项:auto / flash / pro,modelModalIdx 是当前光标。
+func (m model) modelModalBlock() string {
+	title := lipgloss.NewStyle().Bold(true).Foreground(highlightColor).Render(T("model.modal.title"))
+
+	options := []string{T("model.opt.auto"), T("model.opt.flash"), T("model.opt.pro")}
+	rows := make([]string, 0, len(options))
+	for i, opt := range options {
+		marker := "  "
+		style := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+		if i == m.modelModalIdx {
+			marker = "▸ "
+			style = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("10")).Background(lipgloss.Color("236"))
+		}
+		rows = append(rows, style.Render(marker+opt))
+	}
+
+	footer := lipgloss.NewStyle().Foreground(subtleColor).Render(T("model.footer"))
+	parts := []string{title, ""}
+	parts = append(parts, rows...)
+	parts = append(parts, "", footer)
+	content := lipgloss.JoinVertical(lipgloss.Left, parts...)
+
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(highlightColor).
+		Padding(1, 2).
+		Width(52).
+		Render(content)
+}
+
 // truncateReviewArgs 截断审核时显示的参数。
 func truncateReviewArgs(args string, max int) string {
 	if len(args) <= max {
@@ -543,7 +576,8 @@ func (m model) rightPanelView() string {
 	}
 	rows = append(rows, workspaceTitle, "  "+subtle(cwd), "")
 
-	rows = append(rows, section(T("panel.models"), []string{
+	// 标题后标明当前选择模式:auto(按任务路由) / flash / pro(锁定)。
+	rows = append(rows, section(T("panel.models")+" ("+m.modelPin+")", []string{
 		flashIndicator + label(T("panel.label.flash")) + " " + flashID,
 		proIndicator + label(T("panel.label.pro")) + " " + proID,
 	})...)

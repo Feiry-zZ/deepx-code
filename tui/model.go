@@ -59,7 +59,11 @@ type model struct {
 	// activeModelRole 是上一轮 / 当前流的实际生效角色 ("flash" / "pro")。
 	// 每条新用户消息默认从 flash 起手;agent.ModelSwitchMsg 到达时更新为 pro。
 	activeModelRole string
-	activeModelID   string
+
+	// modelPin 是用户用 /model 锁定的模型:"auto"(默认,走关键词路由) / "flash" / "pro"。
+	// 锁定时作为 forceRole 传给 StartStream 绕过路由,并在压缩后重注锁定提示对。
+	modelPin      string
+	activeModelID string
 
 	mode    agent.AgentMode
 	history []agent.ChatMessage
@@ -171,6 +175,11 @@ type model struct {
 	// langModalIdx ∈ {0:zh, 1:en}。
 	showLangModal bool
 	langModalIdx  int
+
+	// /model 选择 modal 状态。showModelModal=true 时路由按键到 modal,
+	// modelModalIdx ∈ {0:auto, 1:flash, 2:pro}。
+	showModelModal bool
+	modelModalIdx  int
 
 	// MCP:mcpMgr 管理外部 MCP server 连接与工具注入(启动时后台连接配置里的 server)。
 	// /mcp-add 弹单行输入框(格式 "名称 命令 [参数...]");/mcp-delete 弹 server 列表选删。
@@ -334,6 +343,7 @@ func initialModel(models agent.ModelConfig, needsSetup bool, version string, hub
 		models:          models,
 		activeModelRole: role,
 		activeModelID:   activeID,
+		modelPin:        "auto",
 		version:         version,
 		mode:            agent.AgentMode_Auto,
 		status:          "idle",
@@ -493,7 +503,12 @@ func (m model) submitUserInput(input string) (model, tea.Cmd) {
 	if input == "" && len(m.attachedImagePaths) == 0 {
 		return m, nil
 	}
-	// 斜杠命令:仅匹配已知命令,粘贴的路径类文本不误触
+	// 斜杠命令(带参数,如 /model flash):首 token 精确命中已知命令名 → 转发完整输入。
+	// 必须在 filterSlashCommands 之前 —— 后者遇空格会返回 nil,会把带参命令误当普通消息。
+	if isExactSlashCommand(input) {
+		return m, m.handleSlashCommand(input)
+	}
+	// 无参数命令 + 前缀补全(如 /au → /auto):走 palette 解析,用解析出的命令名。
 	if matches := filterSlashCommands(input); len(matches) > 0 {
 		cmd := m.handleSlashCommand(matches[0].name)
 		return m, cmd
@@ -550,6 +565,7 @@ func (m model) submitUserInput(input string) (model, tea.Cmd) {
 		workspace,
 		m.skillCatalog,
 		m.summary,
+		m.modelPin,
 	)
 	m.streamCh = ch
 	cmds = append(cmds, cmd)
@@ -612,7 +628,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.MouseWheelMsg:
 		// modal 期间忽略
-		if m.showSetup || m.showLangModal {
+		if m.showSetup || m.showLangModal || m.showModelModal {
 			return m, nil
 		}
 		// 滚轮: 转给 viewport,顺便取消选区
@@ -624,7 +640,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, c
 
 	case tea.MouseClickMsg:
-		if m.showSetup || m.showLangModal {
+		if m.showSetup || m.showLangModal || m.showModelModal {
 			return m, nil
 		}
 		if msg.Button != tea.MouseLeft {
@@ -673,7 +689,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.MouseMotionMsg:
-		if m.showSetup || m.showLangModal {
+		if m.showSetup || m.showLangModal || m.showModelModal {
 			return m, nil
 		}
 		if msg.Button != tea.MouseLeft {
@@ -727,7 +743,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.MouseReleaseMsg:
-		if m.showSetup || m.showLangModal {
+		if m.showSetup || m.showLangModal || m.showModelModal {
 			return m, nil
 		}
 		if msg.Button != tea.MouseLeft {
@@ -862,6 +878,31 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			case "esc", "ctrl+c":
 				m.showLangModal = false
+				return m, nil
+			}
+			return m, nil
+		}
+
+		// /model modal:↑/↓ 选 auto/flash/pro,Enter 确认,Esc 取消
+		if m.showModelModal {
+			switch msg.String() {
+			case "up", "k":
+				if m.modelModalIdx > 0 {
+					m.modelModalIdx--
+				}
+				return m, nil
+			case "down", "j":
+				if m.modelModalIdx < 2 {
+					m.modelModalIdx++
+				}
+				return m, nil
+			case "enter":
+				opts := []string{"auto", tools.RoleFlash, tools.RolePro}
+				m.showModelModal = false
+				m.applyModelPin(opts[m.modelModalIdx])
+				return m, nil
+			case "esc", "ctrl+c":
+				m.showModelModal = false
 				return m, nil
 			}
 			return m, nil
@@ -1410,6 +1451,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.summary = msg.summary
 		m.history = append([]agent.ChatMessage(nil), m.history[msg.cutIdx:]...)
 
+		// 锁定态:压缩可能把 /model 锁定提示对压掉,在截断后历史最前重注一对,
+		// 让模型压缩后仍知道锁的是哪个模型(锁本身靠 m.modelPin,不依赖这对消息)。
+		if m.modelPin == tools.RoleFlash || m.modelPin == tools.RolePro {
+			lockPair := []agent.ChatMessage{
+				{Role: "user", Content: "/model " + m.modelPin},
+				{Role: "assistant", Content: lockedModelMsg(m.modelPin)},
+			}
+			m.history = append(lockPair, m.history...)
+		}
+
 		_ = m.session.SaveSummary(msg.summary)
 		// 压缩后 history 已截断,写回 gob 保持下轮启动一致性
 		if m.session != nil {
@@ -1587,6 +1638,9 @@ func modeNotification(mode agent.AgentMode, modelRole string) string {
 // 异步命令(如 /compact)返回 tea.Cmd 交给 bubbletea 调度。
 func (m *model) handleSlashCommand(input string) tea.Cmd {
 	cmd := strings.ToLower(strings.TrimSpace(input))
+	if strings.HasPrefix(cmd, "/model") { // 带参数,单独解析
+		return m.handleModelCommand(cmd)
+	}
 	switch cmd {
 	case "/plan":
 		m.mode = agent.AgentMode_Plan
@@ -1639,6 +1693,89 @@ func (m *model) handleSlashCommand(input string) tea.Cmd {
 		m.appendChat("assistant", fmt.Sprintf(T("mode.unknown_cmd"), cmd))
 	}
 	return nil
+}
+
+// handleModelCommand 处理 /model:无参数(或参数不认识)→ 弹窗选择;
+// /model auto|flash|pro 带有效参数 → 直接应用(快捷方式)。
+func (m *model) handleModelCommand(cmd string) tea.Cmd {
+	fields := strings.Fields(cmd)
+	if len(fields) < 2 {
+		m.openModelModal()
+		return nil
+	}
+	switch fields[1] {
+	case "auto", tools.RoleFlash, tools.RolePro:
+		m.applyModelPin(fields[1])
+	default:
+		m.openModelModal() // 参数不认识也走弹窗,弹窗本身就是引导
+	}
+	return nil
+}
+
+// openModelModal 打开模型选择弹窗,光标停在当前锁定项。
+func (m *model) openModelModal() {
+	m.modelModalIdx = 0 // auto
+	switch m.modelPin {
+	case tools.RoleFlash:
+		m.modelModalIdx = 1
+	case tools.RolePro:
+		m.modelModalIdx = 2
+	}
+	m.showModelModal = true
+}
+
+// applyModelPin 应用模型选择:设 m.modelPin;锁定 flash/pro 时插入一对 user/assistant
+// 锁定提示(让模型从上下文知道当前锁的是哪个),auto 恢复关键词路由。
+// 锁的强制力在 StartStream(forceRole)+SwitchModel 闸门,不依赖这对消息。
+func (m *model) applyModelPin(arg string) {
+	switch arg {
+	case "auto":
+		m.modelPin = "auto"
+		// auto 起手走 flash,状态区先反映 flash;下一轮按 ModelSwitchMsg 再校正。
+		m.setActiveModel(tools.RoleFlash)
+		msg := T("model.unlocked")
+		m.history = append(m.history, agent.ChatMessage{Role: "assistant", Content: msg})
+		m.appendChat("assistant", msg)
+		if m.session != nil {
+			_ = m.session.Append("assistant", msg)
+		}
+	case tools.RoleFlash, tools.RolePro:
+		m.modelPin = arg
+		m.setActiveModel(arg) // 状态区即时切到锁定的模型
+		m.appendModelLockPair(arg)
+	}
+}
+
+// setActiveModel 立即把状态区显示的活跃模型切到 role,使 /model 选择即时反映在右栏。
+func (m *model) setActiveModel(role string) {
+	m.activeModelRole = role
+	if role == tools.RolePro {
+		m.activeModelID = m.models.Pro.Model
+	} else {
+		m.activeModelID = m.models.Flash.Model
+	}
+}
+
+// appendModelLockPair 写入一对锁定提示(user: /model X + assistant: 已锁定 X),
+// 同步进 history(LLM 上下文)、聊天显示、session。压缩后由 compressionResultMsg 重注。
+func (m *model) appendModelLockPair(role string) {
+	userMsg := "/model " + role
+	botMsg := lockedModelMsg(role)
+	m.history = append(m.history,
+		agent.ChatMessage{Role: "user", Content: userMsg},
+		agent.ChatMessage{Role: "assistant", Content: botMsg},
+	)
+	m.appendChat("user", userMsg)
+	m.appendChat("assistant", botMsg)
+	if m.session != nil {
+		_ = m.session.Append("user", userMsg)
+		_ = m.session.Append("assistant", botMsg)
+	}
+}
+
+// lockedModelMsg 返回"已锁定 X 模型"的提示文案。
+func lockedModelMsg(role string) string {
+	return fmt.Sprintf(T("model.locked"), role)
 }
 
 // startManualCompaction 处理 /compact:手动触发会话压缩,仍按 context_window × 20% 保留尾部。

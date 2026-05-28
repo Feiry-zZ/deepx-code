@@ -388,7 +388,8 @@ var Tools = []Tool{
 			"9. 需要高质量创作(长文档 / 设计稿 / 详细方案)\n" +
 			"10. 上下文接近窗口限制(history 占比 > 70%),需要更大窗口模型\n\n" +
 			"**何时别调**:简单单步任务(读单文件、一行替换、直接答事实、跑 ls/grep)用 flash 足够,不要无脑升级。\n\n" +
-			"已经在 pro 时调用是 no-op(deepx 会返回提示但不报错)。",
+			"**若当前已经在 pro,不要调用本工具**(已是最强模型,调用纯属多余:deepx 会 no-op 并返回提示,只是白白多一次往返)。" +
+			"另:若用户已用 /model flash 锁定 flash,本工具会被忽略,继续用 flash 即可。",
 		Parameters: ToolParam{
 			Type: "object",
 			Properties: map[string]PropDef{

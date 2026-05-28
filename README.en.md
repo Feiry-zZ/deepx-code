@@ -23,7 +23,7 @@
 - **💰 Cache-friendly, cheap long sessions** — engineered around DeepSeek's prefix cache (~99% hit measured); local keyword routing starts every turn with zero latency and zero tokens.
 - **🧭 Built-in code graph (codegraph)** — symbol-level go-to-def / callers / interface impls / blast-radius, precise on Go via `go/types`. Replaces whole-repo grep.
 - **👀 Local image OCR (PaddleOCR)** — read text from a screenshot offline, no multimodal API needed.
-- **🧠 Dual-model auto-routing** — flash for cheap iteration, auto-escalates to pro for hard work; or drive it manually with `/auto` `/plan` `/review`.
+- **🧠 Dual-model auto-routing** — flash for cheap iteration, auto-escalates to pro for hard work; pin a model with `/model flash|pro` or switch mode with `/auto` `/plan` `/review`.
 - **🗂️ Sequential Todo + concurrent Plan DAG** — step through a visible checklist for multi-step work; fan out independent subtasks to concurrent sub-agents.
 - **💾 Lossless session persistence** — gob preserves `tool_calls` / tool results / `reasoning_content`, so restarts resume seamlessly; auto layered compaction when the window fills.
 - **🔌 MCP + skill ecosystem** — native MCP; compatible with Claude's skill directories, reuse what you have.
@@ -192,6 +192,7 @@ A built-in symbol-graph engine lets the model do symbol-level navigation + call-
 | Command                              | Action                              |
 | :----------------------------------- | :---------------------------------- |
 | `/plan` `/auto` `/review`            | switch mode (read-only / auto / review) |
+| `/model`                             | popup to pick the model (auto routes by task / flash / pro lock); `/model flash` also works directly |
 | `/compact`                           | manually compact the session        |
 | `/lang`                              | switch UI language (zh / en)        |
 | `/mcp-list` `/mcp-add` `/mcp-delete` | manage MCP servers                  |
