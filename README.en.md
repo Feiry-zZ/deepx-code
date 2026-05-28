@@ -2,7 +2,7 @@
 
 # deepx-code
 
-**A DeepSeek-native coding agent for your terminal — single binary, cache-friendly, with a built-in code graph and local OCR**
+**A DeepSeek-native, OpenAI-compatible coding agent for your terminal (Xiaomi MiMo now supported) — single binary, cache-friendly, with a built-in code graph and local OCR**
 
 [![Go](https://img.shields.io/badge/built%20with-Go-00ADD8?logo=go&logoColor=white)](https://go.dev) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Release](https://img.shields.io/github/v/release/itmisx/deepx-code?color=success)](https://github.com/itmisx/deepx-code/releases) [![Stars](https://img.shields.io/github/stars/itmisx/deepx-code?style=flat)](https://github.com/itmisx/deepx-code/stargazers) ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)
 
@@ -35,7 +35,7 @@
 | :---------------- | :-------------------------------------- | :----------------------- |
 | Distribution      | Single Go binary, one-line `curl`       | Node (npm)               |
 | Open source       | ✅ MIT                                  | ❌ Closed                |
-| Model             | DeepSeek (flash/pro auto-routing, your key) | Anthropic Claude       |
+| Model             | DeepSeek / Xiaomi MiMo (OpenAI-compatible, pick provider at setup, flash/pro auto-routing) | Anthropic Claude       |
 | Cost              | ~99% cache hit on long sessions         | Subscription / Claude API usage |
 | Built-in code graph | ✅ codegraph (precise on Go via `go/types`) | ❌ (grep / search)   |
 | Local · offline OCR | ✅ PaddleOCR                          | ❌ (images via cloud multimodal) |
@@ -70,7 +70,8 @@ deepx
 
 | Item         | How                                                          |
 | :----------- | :----------------------------------------------------------- |
-| DeepSeek key | A wizard prompts on first run and persists to `~/.deepx/model.yaml` (defaults `deepseek-v4-flash` / `deepseek-v4-pro`, 1M context). Reconfigure with `/config`. |
+| Provider & key | A wizard prompts on first run: **use ←/→ to pick a provider (DeepSeek / Xiaomi MiMo), then enter its API key**, persisted to `~/.deepx/model.yaml`. Each provider ships default flash/pro models and 1M context (DeepSeek `deepseek-v4-flash` / `-pro`, MiMo `mimo-v2.5` / `-pro`). Reconfigure with `/config`. |
+| Manual override | Edit `~/.deepx/model.yaml` directly to override `base_url` / `model` / `api_key` / `max_tokens` / `context_window` per role (flash/pro); flash and pro may even point at different providers. |
 | Skills       | Drop into `<workspace>/.deepx/skills/`, or reuse `~/.claude/skills/` etc. |
 | MCP          | Add via `/mcp-add` inside the TUI; list with `/mcp-list`.    |
 

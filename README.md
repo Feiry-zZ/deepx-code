@@ -2,7 +2,7 @@
 
 # deepx-code
 
-**DeepSeek 原生的终端编程 Agent —— 单二进制、缓存友好、内置代码图谱与本地 OCR**
+**DeepSeek 原生、兼容 OpenAI 接口的终端编程 Agent（已支持小米 MiMo）—— 单二进制、缓存友好、内置代码图谱与本地 OCR**
 
 [![Go](https://img.shields.io/badge/built%20with-Go-00ADD8?logo=go&logoColor=white)](https://go.dev) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Release](https://img.shields.io/github/v/release/itmisx/deepx-code?color=success)](https://github.com/itmisx/deepx-code/releases) [![Stars](https://img.shields.io/github/stars/itmisx/deepx-code?style=flat)](https://github.com/itmisx/deepx-code/stargazers) ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)
 
@@ -35,7 +35,7 @@
 | :--------------- | :----------------------------------- | :--------------------- |
 | 分发             | Go 单二进制，`curl` 一行装           | Node（npm）            |
 | 开源             | ✅ MIT                               | ❌ 闭源                |
-| 模型             | DeepSeek（flash/pro 自动路由，自带 key） | Anthropic Claude       |
+| 模型             | DeepSeek / 小米 MiMo（OpenAI 兼容，配置时选供应商，flash/pro 自动路由） | Anthropic Claude       |
 | 成本             | 长会话 ~99% 缓存命中，几乎不为重复上下文付费 | 订阅 / 按 Claude API 用量 |
 | 内置代码图谱     | ✅ codegraph（Go 走 `go/types` 精确） | ❌（靠 grep / 搜索）   |
 | 本地 · 离线 OCR  | ✅ PaddleOCR                         | ❌（图片走云端多模态） |
@@ -70,7 +70,8 @@ deepx
 
 | 项目        | 怎么做                                                        |
 | :---------- | :----------------------------------------------------------- |
-| DeepSeek Key | 首次启动弹出向导填入，持久化到 `~/.deepx/model.yaml`（默认 `deepseek-v4-flash` / `deepseek-v4-pro`，1M 上下文）。也可 `/config` 重配。 |
+| 供应商 & Key | 首次启动弹出向导：**用 ←/→ 选模型供应商（DeepSeek / 小米 MiMo），再填对应 API Key**，持久化到 `~/.deepx/model.yaml`。各供应商已预置 flash/pro 默认模型与 1M 上下文（DeepSeek `deepseek-v4-flash` / `-pro`，MiMo `mimo-v2.5` / `-pro`）。也可 `/config` 重配。 |
+| 手动覆盖    | 可直接编辑 `~/.deepx/model.yaml`，按 role（flash/pro）覆盖 `base_url` / `model` / `api_key` / `max_tokens` / `context_window`；flash 与 pro 也可指向不同供应商。 |
 | Skill       | 放到 `<工作区>/.deepx/skills/`，或复用 `~/.claude/skills/` 等已有目录。 |
 | MCP         | TUI 内 `/mcp-add` 添加，`/mcp-list` 查看。                    |
 

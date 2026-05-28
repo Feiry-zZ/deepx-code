@@ -2,7 +2,7 @@
 
 # deepx-code
 
-**DeepSeek 네이티브 터미널 코딩 에이전트 —— 단일 바이너리, 캐시 친화적, 코드 그래프와 로컬 OCR 내장**
+**DeepSeek 네이티브, OpenAI 호환 터미널 코딩 에이전트(Xiaomi MiMo 지원) —— 단일 바이너리, 캐시 친화적, 코드 그래프와 로컬 OCR 내장**
 
 [![Go](https://img.shields.io/badge/built%20with-Go-00ADD8?logo=go&logoColor=white)](https://go.dev) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Release](https://img.shields.io/github/v/release/itmisx/deepx-code?color=success)](https://github.com/itmisx/deepx-code/releases) [![Stars](https://img.shields.io/github/stars/itmisx/deepx-code?style=flat)](https://github.com/itmisx/deepx-code/stargazers) ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)
 
@@ -35,7 +35,7 @@
 | :------------------ | :-------------------------------------- | :----------------------- |
 | 배포                | 단일 Go 바이너리, `curl` 한 줄           | Node(npm)                |
 | 오픈소스            | ✅ MIT                                  | ❌ 비공개                |
-| 모델                | DeepSeek(flash/pro 자동 라우팅, 자기 key) | Anthropic Claude        |
+| 모델                | DeepSeek / Xiaomi MiMo(OpenAI 호환, 설정 시 공급자 선택, flash/pro 자동 라우팅) | Anthropic Claude        |
 | 비용                | 긴 세션 ~99% 캐시 적중                   | 구독 / Claude API 사용량  |
 | 코드 그래프 내장    | ✅ codegraph(Go는 `go/types`로 정확)     | ❌(grep / 검색)          |
 | 로컬·오프라인 OCR   | ✅ PaddleOCR                            | ❌(이미지는 클라우드 멀티모달) |
@@ -70,7 +70,8 @@ deepx
 
 | 항목          | 방법                                                         |
 | :------------ | :----------------------------------------------------------- |
-| DeepSeek Key  | 첫 실행 시 마법사로 입력해 `~/.deepx/model.yaml`에 저장(기본값 `deepseek-v4-flash` / `deepseek-v4-pro`, 1M 컨텍스트). `/config`로 재설정. |
+| 공급자 & Key | 첫 실행 마법사에서 **←/→로 공급자(DeepSeek / Xiaomi MiMo)를 선택하고 해당 API Key를 입력**해 `~/.deepx/model.yaml`에 저장. 각 공급자에 flash/pro 기본 모델과 1M 컨텍스트 제공(DeepSeek `deepseek-v4-flash` / `-pro`, MiMo `mimo-v2.5` / `-pro`). `/config`로 재설정. |
+| 수동 재정의   | `~/.deepx/model.yaml`을 직접 편집해 role(flash/pro)별로 `base_url` / `model` / `api_key` / `max_tokens` / `context_window`를 재정의 가능. flash와 pro가 서로 다른 공급자를 가리킬 수도 있음. |
 | Skill         | `<워크스페이스>/.deepx/skills/`에 두거나 `~/.claude/skills/` 등 재사용. |
 | MCP           | TUI에서 `/mcp-add`로 추가, `/mcp-list`로 목록 확인.          |
 

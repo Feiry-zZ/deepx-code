@@ -2,7 +2,7 @@
 
 # deepx-code
 
-**DeepSeek ネイティブのターミナル向けコーディングエージェント —— 単一バイナリ・キャッシュフレンドリー・コードグラフとローカル OCR を内蔵**
+**DeepSeek ネイティブ・OpenAI 互換のターミナル向けコーディングエージェント（Xiaomi MiMo 対応済み）—— 単一バイナリ・キャッシュフレンドリー・コードグラフとローカル OCR を内蔵**
 
 [![Go](https://img.shields.io/badge/built%20with-Go-00ADD8?logo=go&logoColor=white)](https://go.dev) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Release](https://img.shields.io/github/v/release/itmisx/deepx-code?color=success)](https://github.com/itmisx/deepx-code/releases) [![Stars](https://img.shields.io/github/stars/itmisx/deepx-code?style=flat)](https://github.com/itmisx/deepx-code/stargazers) ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)
 
@@ -35,7 +35,7 @@
 | :------------------ | :-------------------------------------- | :----------------------- |
 | 配布                | 単一 Go バイナリ、`curl` 一行            | Node（npm）              |
 | オープンソース      | ✅ MIT                                  | ❌ クローズド            |
-| モデル              | DeepSeek（flash/pro 自動ルーティング、自分の key） | Anthropic Claude   |
+| モデル              | DeepSeek / Xiaomi MiMo（OpenAI 互換、設定時にプロバイダを選択、flash/pro 自動ルーティング） | Anthropic Claude   |
 | コスト              | 長いセッションで ~99% キャッシュヒット   | サブスク / Claude API 従量 |
 | コードグラフ内蔵    | ✅ codegraph（Go は `go/types` で正確）  | ❌（grep / 検索）        |
 | ローカル・オフライン OCR | ✅ PaddleOCR                        | ❌（画像はクラウドのマルチモーダル） |
@@ -70,7 +70,8 @@ deepx
 
 | 項目          | 方法                                                         |
 | :------------ | :----------------------------------------------------------- |
-| DeepSeek Key  | 初回起動時にウィザードで入力し `~/.deepx/model.yaml` に保存（既定値 `deepseek-v4-flash` / `deepseek-v4-pro`、1M コンテキスト）。`/config` で再設定。 |
+| プロバイダ & Key | 初回起動時のウィザードで：**←/→ でプロバイダ（DeepSeek / Xiaomi MiMo）を選び、対応する API Key を入力**し `~/.deepx/model.yaml` に保存。各プロバイダに flash/pro の既定モデルと 1M コンテキストを用意（DeepSeek `deepseek-v4-flash` / `-pro`、MiMo `mimo-v2.5` / `-pro`）。`/config` で再設定。 |
+| 手動上書き    | `~/.deepx/model.yaml` を直接編集し、role（flash/pro）ごとに `base_url` / `model` / `api_key` / `max_tokens` / `context_window` を上書き可能。flash と pro で別プロバイダも指定できる。 |
 | Skill         | `<ワークスペース>/.deepx/skills/` に配置、または `~/.claude/skills/` などを再利用。 |
 | MCP           | TUI 内で `/mcp-add` で追加、`/mcp-list` で一覧。              |
 
