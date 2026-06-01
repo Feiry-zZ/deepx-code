@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"os/exec"
 	"runtime"
 	"strings"
 	"testing"
@@ -43,8 +44,8 @@ func TestRunCommand_AutoHandoffToBackground(t *testing.T) {
 	if !res.Success {
 		t.Fatalf("auto-bg 路径应返回 Success=true,实际 false: %q", res.Output)
 	}
-	if !strings.Contains(res.Output, "自动切到后台") {
-		t.Errorf("应含'自动切到后台'文案,got %q", res.Output)
+	if !strings.Contains(res.Output, "切到后台") {
+		t.Errorf("应含'切到后台'文案,got %q", res.Output)
 	}
 	if !strings.Contains(res.Output, "句柄 id: bash_") {
 		t.Errorf("应含分配的句柄 id,got %q", res.Output)
@@ -82,7 +83,7 @@ func TestRunCommand_SleepNotAutoBackgrounded(t *testing.T) {
 	if !res.Success {
 		t.Fatalf("sleep 应正常完成,实际 false: %q", res.Output)
 	}
-	if strings.Contains(res.Output, "自动切到后台") {
+	if strings.Contains(res.Output, "切到后台") {
 		t.Errorf("sleep 不应被 auto-bg,got %q", res.Output)
 	}
 	if elapsed < 250*time.Millisecond {
@@ -109,10 +110,9 @@ func TestRunCommand_ExplicitBackgroundUnchanged(t *testing.T) {
 	}
 }
 
-// issue #20 同形:命令尾带 `&` 想"自己后台化",前台路径下 Go 会卡到 shell 派生的
-// 子进程仍持 stdout/stderr 管道,管道不关 → wait 不返回。
-// 现在的处理:autoBackgroundBudget 到期 → 自动接管到 bg,**不杀进程**,返回句柄。
-// 这个测试模拟"shell 后台化常驻进程"的精确语义,确认不会再 60s 卡死。
+// issue #20 同形:命令用 `&` 把常驻进程丢后台,父 shell 立刻退出但子进程继承 stdout/stderr 管道。
+// 现在的处理:父进程退出后管道仍未 EOF(子进程占着)→ readerDrainGrace 内切到后台返回句柄,
+// 既不卡到 timeout,也不傻等满 autoBackgroundBudget。确认不会再 60s 卡死。
 func TestRunCommand_Issue20_ShellBackgroundedDoesNotHang(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("issue #20 是 Linux/WSL,用 sh 语法构造,Windows 跳过")
@@ -133,7 +133,7 @@ func TestRunCommand_Issue20_ShellBackgroundedDoesNotHang(t *testing.T) {
 	if elapsed > 2*time.Second {
 		t.Errorf("不该卡到 timeout,实际用了 %v(应在 ~100ms+ε 切 bg)", elapsed)
 	}
-	if !strings.Contains(res.Output, "自动切到后台") {
+	if !strings.Contains(res.Output, "切到后台") {
 		t.Errorf("应走 auto-handoff 路径,got %q", res.Output)
 	}
 
@@ -145,6 +145,47 @@ func TestRunCommand_Issue20_ShellBackgroundedDoesNotHang(t *testing.T) {
 		}
 		_ = KillBash(map[string]any{"id": res.Output[i:end]})
 	}
+}
+
+// issue #20 回归:命令同形于 `cd ... && <server> &`(server 长命),auto-bg 后用 KillBash
+// 必须真正杀掉那个后台子进程。曾经的 bug:父 shell 成僵尸 → Getpgid 返回 ESRCH →
+// killProc 误判"已结束"放过孤儿 → 端口/资源泄漏。
+func TestRunCommand_Issue20_KillBashReallyKillsOrphan(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("issue #20 是 Linux/WSL,Windows 跳过")
+	}
+	withShortAutoBgBudget(t, 100*time.Millisecond)
+
+	// 唯一的 sleep 时长当 marker,便于 pgrep 在进程命令行里精确核实它死没死。
+	const marker = "64.242242"
+	// 同形于 issue #20:cd 起手 + 后台长命进程 + 尾部 echo。
+	res := RunCommand(map[string]any{
+		"command": "cd /tmp && sleep " + marker + " & echo started",
+	})
+	if !res.Success || !strings.Contains(res.Output, "切到后台") {
+		t.Fatalf("应切到后台,got success=%v %q", res.Success, res.Output)
+	}
+	id := extractID(t, res.Output) // 复用 bg_test.go 的句柄解析
+	if !markerProcessAlive(t, marker) {
+		t.Fatalf("后台进程应在运行")
+	}
+
+	k := KillBash(map[string]any{"id": id})
+	if !k.Success {
+		t.Errorf("KillBash 应成功,got %q", k.Output)
+	}
+	time.Sleep(300 * time.Millisecond) // 等内核回收
+	if markerProcessAlive(t, marker) {
+		// 兜底清理,别把孤儿留给后续测试 / CI
+		_ = exec.Command("pkill", "-9", "-f", marker).Run()
+		t.Errorf("❌ KillBash 之后后台进程仍存活 —— killProc 漏杀(issue #20 回归)")
+	}
+}
+
+func markerProcessAlive(t *testing.T, marker string) bool {
+	t.Helper()
+	out, _ := exec.Command("pgrep", "-f", marker).Output()
+	return strings.TrimSpace(string(out)) != ""
 }
 
 // isAutoBackgroundAllowed 单测:取 first token,sleep 拒绝,其他允许。

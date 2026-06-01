@@ -2,6 +2,8 @@ package tools
 
 import (
 	"fmt"
+	"io"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -15,6 +17,58 @@ import (
 //
 // 设成 package-level var 而非 const,方便测试时调小(避免单测真等 15s)。
 var autoBackgroundBudget = 15 * time.Second
+
+// readerDrainGrace:进程退出后,最多再等输出管道收尾这么久,以抓全残余输出。
+// 正常完成的命令几乎瞬间 EOF;若超过这点仍未 EOF,说明有后台子进程还占着输出
+// (典型是命令里用 shell `&` 把 server / daemon 丢到了后台)→ 切到后台管理给句柄,
+// 而不是干等。设成 var 便于测试调小。
+var readerDrainGrace = 200 * time.Millisecond
+
+// startWithPipe 启动 cmd,stdout/stderr 接到一个真实管道(*os.File),父进程随即关掉写端,
+// 起 goroutine 把管道内容拷进 buf;管道读到 EOF(所有写端都关)时关闭返回的 readerDone。
+//
+// 关键:用 *os.File 而不是把 buf(io.Writer)直接挂到 cmd.Stdout —— 后者会让 Go 内部起一条
+// io.Copy goroutine,而 cmd.Wait() 必须等这条 goroutine 读到 EOF 才返回。一旦命令用 `&` 把
+// 长命子进程丢到后台,子进程继承并占着写端,EOF 永不到 → Wait() 永不返回(issue #20 卡死根因)。
+// 改用 *os.File 后,Go 直接把 fd 交给子进程、不起内部 goroutine,cmd.Wait() 只等"进程退出",
+// 不再被孤儿子进程占着的管道拖住。
+func startWithPipe(cmd *exec.Cmd, buf *lockedBuffer) (readerDone chan struct{}, err error) {
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		return nil, err
+	}
+	cmd.Stdout = pw
+	cmd.Stderr = pw
+	if err := cmd.Start(); err != nil {
+		pw.Close()
+		pr.Close()
+		return nil, err
+	}
+	pw.Close() // 父进程不再持有写端,只剩子进程(组)持有;它们全退出后 pr 才 EOF
+	readerDone = make(chan struct{})
+	go func() {
+		_, _ = io.Copy(buf, pr)
+		pr.Close()
+		close(readerDone)
+	}()
+	return readerDone, nil
+}
+
+// backgroundHandoffResult 是"前台命令被切到后台"统一的返回文案(15s 预算到期 / 进程退出但
+// 仍有后台子进程占着输出两种路径共用)。
+func backgroundHandoffResult(id, reason string) ToolResult {
+	return ToolResult{
+		Output: fmt.Sprintf(
+			"%s,已**切到后台**(同一个进程继续运行,没杀重启)。\n"+
+				"句柄 id: %s\n"+
+				"- 后续用 BashOutput(id=%q) 读输出 / 查就绪;\n"+
+				"- 用完用 KillBash(id=%q) 收尾;\n\n"+
+				"提示:下次启动 dev server / watch / daemon 这类常驻进程,**直接传 `run_in_background: true`**\n"+
+				"(无需在命令尾加 `&` / nohup)。",
+			reason, id, id, id),
+		Success: true,
+	}
+}
 
 // RunCommand 执行 shell 命令并返回输出。
 // 参数:
@@ -67,16 +121,14 @@ func runForegroundWithAutoHandoff(command, cwd string, timeoutSec int) ToolResul
 	setPgid(cmd) // 进程组化:auto-bg 后 KillBash 能整族杀;timeout 路径也能整族杀。
 
 	buf := &lockedBuffer{}
-	cmd.Stdout = buf
-	cmd.Stderr = buf
-
 	startedAt := time.Now()
-	if err := cmd.Start(); err != nil {
+	readerDone, err := startWithPipe(cmd, buf) // *os.File 管道:Wait 只等进程退出,不被孤儿管道卡住
+	if err != nil {
 		return ToolResult{Output: fmt.Sprintf("启动失败: %v", err), Success: false}
 	}
 
-	// Wait goroutine:命令真正退出时往 waitErrCh 写一个值。
-	// 这个 channel 由 select 消费(完成路径);若走 auto-bg 接管,由 adoptBackground 接管消费。
+	// Wait goroutine:命令进程退出时往 waitErrCh 写一个值。
+	// 完成路径由 select 消费;走 auto-bg 接管时由 adoptBackground 接管消费。
 	waitErrCh := make(chan error, 1)
 	go func() {
 		waitErrCh <- cmd.Wait()
@@ -91,18 +143,31 @@ func runForegroundWithAutoHandoff(command, cwd string, timeoutSec int) ToolResul
 	// 用来处理"sleep 等不允许 auto-bg 的命令":自然 fallback 到等 waitErrCh 或 timeout。
 	autoBgCh := autoBgTimer.C
 
+	// finishOrAdopt:进程已退出(werr 是其退出结果)后的统一收尾 —— 等输出 goroutine 收尾抓全
+	// 残余输出;若 readerDrainGrace 内管道仍未 EOF(有后台子进程占着,典型是命令用 `&` 把 server
+	// 丢后台、shell 自己秒退),就切到后台给句柄,而不是当"已完成"返回把那个子进程漏成无主孤儿。
+	finishOrAdopt := func(werr error) ToolResult {
+		select {
+		case <-readerDone:
+			return formatForegroundResult(buf.drain(), werr)
+		case <-time.After(readerDrainGrace):
+			id := adoptBackground(cmd, buf, startedAt, nil, readerDone)
+			return backgroundHandoffResult(id, "命令已返回,但仍有子进程在后台占用输出")
+		}
+	}
+
 	for {
 		select {
-		case err := <-waitErrCh:
-			// 路径 A:正常完成(或非超时错误)。
-			return formatForegroundResult(buf.drain(), err)
+		case werr := <-waitErrCh:
+			// 进程已退出 → 收尾或(有后台子进程时)转后台。这正是 issue #20 的形态。
+			return finishOrAdopt(werr)
 
 		case <-autoBgCh:
 			// 微观竞态防御:autoBg 跟 wait 完成可能同时 ready,select 随机选一个。
-			// 若 wait 已就绪就别接管"已完成"的进程,走完成路径。
+			// 若 wait 已就绪就走完成收尾(同样会在仍有后台子进程时转后台),不当"前台超时"处理。
 			select {
-			case err := <-waitErrCh:
-				return formatForegroundResult(buf.drain(), err)
+			case werr := <-waitErrCh:
+				return finishOrAdopt(werr)
 			default:
 			}
 			if !isAutoBackgroundAllowed(command) {
@@ -110,19 +175,9 @@ func runForegroundWithAutoHandoff(command, cwd string, timeoutSec int) ToolResul
 				autoBgCh = nil
 				continue
 			}
-			// 路径 B:接管到 bg,同一个进程继续跑。
-			id := adoptBackground(cmd, buf, startedAt, waitErrCh)
-			return ToolResult{
-				Output: fmt.Sprintf(
-					"命令前台跑了 %s 仍未退出,已**自动切到后台**(同一个进程继续运行,没杀重启)。\n"+
-						"句柄 id: %s\n"+
-						"- 后续用 BashOutput(id=%q) 读输出 / 查就绪;\n"+
-						"- 用完用 KillBash(id=%q) 收尾;\n\n"+
-						"提示:下次启动 dev server / watch / daemon 这类常驻进程,**直接传 `run_in_background: true`**\n"+
-						"(无需在命令尾加 `&` / nohup —— 那种 shell 后台化在前台路径下会卡住,本工具会自动救场切 bg)。",
-					autoBackgroundBudget, id, id, id),
-				Success: true,
-			}
+			// 路径 B:接管到 bg,同一个进程继续跑(典型:前台 dev server 不带 `&`,进程一直活着)。
+			id := adoptBackground(cmd, buf, startedAt, waitErrCh, readerDone)
+			return backgroundHandoffResult(id, fmt.Sprintf("命令前台跑了 %s 仍未退出", autoBackgroundBudget))
 
 		case <-timeoutTimer.C:
 			// 路径 C:跑到了硬超时(此时仅可能是 sleep 等不允许 auto-bg 的命令在等)。

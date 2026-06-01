@@ -73,10 +73,8 @@ func startBackground(command, cwd string) ToolResult {
 	setPgid(cmd) // 单独进程组,便于 KillBash 连子进程一起杀(否则 node/vite 之类会成孤儿)
 
 	buf := &lockedBuffer{}
-	cmd.Stdout = buf
-	cmd.Stderr = buf
-
-	if err := cmd.Start(); err != nil {
+	readerDone, err := startWithPipe(cmd, buf) // *os.File 管道,理由见 startWithPipe 注释
+	if err != nil {
 		return ToolResult{Output: fmt.Sprintf("后台启动失败: %v", err), Success: false}
 	}
 
@@ -88,10 +86,11 @@ func startBackground(command, cwd string) ToolResult {
 	bgMu.Unlock()
 
 	go func() {
-		err := cmd.Wait()
+		werr := cmd.Wait() // 进程退出(拿退出码)
+		<-readerDone       // 再等管道 EOF:命令若用 `&` 派生了后台孙子进程,等它们也退了才算真 done
 		p.mu.Lock()
 		p.done = true
-		p.exitErr = err
+		p.exitErr = werr
 		p.mu.Unlock()
 	}()
 
@@ -113,9 +112,12 @@ func startBackground(command, cwd string) ToolResult {
 // 这样 `python -m http.server &` 这类命令(包括正确不带 `&` 的)能继续提供服务,
 // 模型用 BashOutput / KillBash 接力,验证步骤照旧能跑(对照 issue #20)。
 //
-// waitErrCh 是调用方那边读 cmd.Wait() 结果的 channel —— 命令真正退出时会有一个值,
-// 这里起 goroutine 接收并更新 bgProc.done / exitErr,跟 startBackground 的语义对齐。
-func adoptBackground(cmd *exec.Cmd, buf *lockedBuffer, startedAt time.Time, waitErrCh <-chan error) string {
+// done 的判据统一为 readerDone 关闭(管道 EOF = 所有占着输出的进程都退了),而非只看 leader
+// 进程退出 —— 否则 `<server> &` 会在 shell 秒退时被误判为"已结束"。waitErrCh 仅用来取退出码,可为 nil:
+//   - 非 nil(15s 预算路径,进程还在跑)→ 从中取退出码,再等 readerDone 才算 done。
+//   - nil(进程已退出、仍有后台子进程占着输出的收尾路径)→ 只靠 readerDone 判 done,
+//     退出码无从得知(占着管道的是被 `&` 派生的孙子进程),exitErr 记 nil。
+func adoptBackground(cmd *exec.Cmd, buf *lockedBuffer, startedAt time.Time, waitErrCh <-chan error, readerDone <-chan struct{}) string {
 	bgMu.Lock()
 	bgSeq++
 	id := fmt.Sprintf("bash_%d", bgSeq)
@@ -124,10 +126,14 @@ func adoptBackground(cmd *exec.Cmd, buf *lockedBuffer, startedAt time.Time, wait
 	bgMu.Unlock()
 
 	go func() {
-		err := <-waitErrCh
+		var werr error
+		if waitErrCh != nil {
+			werr = <-waitErrCh
+		}
+		<-readerDone
 		p.mu.Lock()
 		p.done = true
-		p.exitErr = err
+		p.exitErr = werr
 		p.mu.Unlock()
 	}()
 	return id
