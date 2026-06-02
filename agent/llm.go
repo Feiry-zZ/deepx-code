@@ -39,6 +39,9 @@ type ModelEntry struct {
 	// 推理参数(跨供应商通用,空值不发送)。详见 config.ModelEntry 同名字段注释。
 	ReasoningEffort string
 	Thinking        string
+	// Vision 表示该模型是否支持图片输入(由启动探测的缓存填入,见 tui)。决定带图消息发请求时
+	// 渲染成 base64 image_url(true)还是路径文本走 OCR(false)。
+	Vision bool
 }
 
 // ModelConfig 双模型配置。Flash 处理简单/查询型任务,Pro 处理复杂/规划型任务。
@@ -78,6 +81,13 @@ type HistoryUpdateMsg struct {
 	History []ChatMessage
 }
 
+// VisionUnsupportedMsg:本以为支持视觉的模型,实际发图被端点拒(如 404 "no image input")。
+// agent 已自动改用 OCR 重发,这里通知 TUI 把该模型标记为无视觉、纠正缓存,后续不再发 base64。
+type VisionUnsupportedMsg struct {
+	Model   string
+	BaseURL string
+}
+
 // PrefixSnapshotMsg 携带本轮"实际发送"的前缀(system 文本 + tool specs JSON)。
 // TUI 持久化它,用于重启变化检测与缓存友好压缩复刻旧前缀。每轮发一次。
 type PrefixSnapshotMsg struct {
@@ -99,6 +109,10 @@ type ChatMessage struct {
 	ToolCalls        []ToolCall    `json:"-"`
 	ToolCallID       string        `json:"-"`
 	Name             string        `json:"-"`
+	// ImagePaths 是这条消息附带的图片绝对路径(粘贴落盘的图)。**规范形态只存路径、不存 base64**
+	// (历史小、缓存友好)。发请求前由 renderConvoImages 按"当轮模型支不支持视觉"即时渲染:
+	// 支持 → 读成 base64 image_url;不支持 → 路径替回文本走 OCR。gob 持久化(导出字段)。
+	ImagePaths []string `json:"-"`
 }
 
 // ContentPart 是 OpenAI 多模态消息里 content 数组的一个元素。
@@ -528,13 +542,29 @@ func StartStream(
 			// 不再主动 strip reasoning_content:本轮不切换模型,thinking 模型仍按需回传,
 			// 非 thinking 模型对 history 里的字段视而不见。若个别模型报错,
 			// streamOnce 仍有 errReasoningRequired retry 兜底。
+			// 按本轮模型支不支持视觉,即时把带图消息渲染成 base64 或 路径+OCR(见 renderConvoImages)。
+			// 只渲染发出去的副本,convo 规范形态(只存路径)不变。
 			assistantContent, reasoning, toolCalls, usage, err := streamOnce(
 				ctx,
 				currentEntry.APIKey, currentEntry.BaseURL, currentEntry.Model,
-				convo, currentEntry.MaxTokens, toolSpecs,
+				renderConvoImages(convo, currentEntry.Vision), currentEntry.MaxTokens, toolSpecs,
 				currentEntry.ReasoningEffort, currentEntry.Thinking,
 				ch,
 			)
+			// 自愈兜底:被端点以"不支持图片输入"拒掉(无论 base64 是探测误判发的、还是历史里混进来的)→
+			// 把该模型降级为无视觉(本轮后续也生效),用"剥图"渲染重发一次,并通知 TUI 纠正缓存。
+			// 不限定 currentEntry.Vision —— base64 可能从别处混入,撞到就无条件回退。用户看不到这个 404。
+			if err != nil && isImageInputUnsupported(err) {
+				currentEntry.Vision = false
+				ch <- VisionUnsupportedMsg{Model: currentEntry.Model, BaseURL: currentEntry.BaseURL}
+				assistantContent, reasoning, toolCalls, usage, err = streamOnce(
+					ctx,
+					currentEntry.APIKey, currentEntry.BaseURL, currentEntry.Model,
+					renderConvoImages(convo, false), currentEntry.MaxTokens, toolSpecs,
+					currentEntry.ReasoningEffort, currentEntry.Thinking,
+					ch,
+				)
+			}
 			if err != nil {
 				// context 取消是主动中断,不报 Error 给 UI。
 				if errors.Is(err, context.Canceled) {
@@ -698,6 +728,19 @@ func StartStream(
 							Output:  fmt.Sprintf("已切到 pro 模型 (%s)。本轮剩余请求 + reasoning 用 pro 处理。", currentEntry.Model),
 							Success: true,
 						}
+					}
+				case "OCR":
+					// 视觉模型本就能看图。它对"已经内联给它的那张图"还调 OCR(mimo 甚至会先 ls 缓存目录
+					// 再 OCR),纯属冗余绕路 —— base64 都喂到嘴边了还去翻文件。软提醒(消息备注/工具描述)
+					// 压不住这个模型,这里在执行层硬拦:不真跑 OCR,把它怼回去直接看图。不改工具表,缓存安全。
+					// 只拦"对已内联图的 OCR";OCR 一个没内联的文件路径(视觉模型确实看不到的)照常放行。
+					if currentEntry.Vision && ocrTargetsInlinedImage(tc.Function.Arguments, convo) {
+						result = tools.ToolResult{
+							Output:  "你是视觉模型,这张图已经以图片形式内联在当前对话里了,请直接查看图片作答 —— 不要调用 OCR,也不要用 ls/find 去文件系统查找图片文件。",
+							Success: false,
+						}
+					} else {
+						result = executeTool(tc, mode)
 					}
 				default:
 					result = executeTool(tc, mode)
