@@ -362,11 +362,11 @@ var Tools = []Tool{
 	},
 	{
 		Name:        "OCR",
-		Description: "对本地图片做 OCR 识别,返回图片中的全部文字 (基于 PaddleOCR PP-OCRv5,支持中英文)。当对话里出现图片路径 (常见 [Image #N] 占位符已被替换为路径),需要了解图片内容时调用本工具。首次调用会自动下载 ~37MB 模型,后续调用秒级响应。",
+		Description: "对本地图片做 OCR 识别,返回图片中的全部文字 (基于 PaddleOCR PP-OCRv5,支持中英文)。**仅当对话里给的是图片文件路径、而你无法直接看到这张图时**才调用本工具(供不支持视觉的模型读图)。**如果图片已经直接内联显示在消息里(你能看到图),绝对不要调用本工具,直接看图作答即可。** path 必须用消息里直接给你的那条图片路径原样传入;绝不要自己去文件系统里搜索、ls 或猜测图片文件。首次调用会自动下载 ~37MB 模型,后续秒级响应。",
 		Parameters: ToolParam{
 			Type: "object",
 			Properties: map[string]PropDef{
-				"path": {Type: "string", Description: "图片的本地文件路径,支持 PNG/JPEG/GIF"},
+				"path": {Type: "string", Description: "图片的本地文件路径,支持 PNG/JPEG/GIF;直接用消息里给出的那条路径,不要自己搜索或猜测"},
 			},
 			Required: []string{"path"},
 		},

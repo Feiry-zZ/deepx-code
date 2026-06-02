@@ -13,7 +13,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -30,6 +29,10 @@ import (
 
 // imagePlaceholderRe 匹配输入框里 [Image #N] 形式的图片占位符。
 var imagePlaceholderRe = regexp.MustCompile(`\[Image #(\d+)\]`)
+
+// inputDragThreshold 是触发"输入框拖拽全选"所需的最小横向移动格数。
+// 双击/点击时常有 1~2 格抖动,设 3 可把这种抖动挡在外面,只有真拖动才全选。
+const inputDragThreshold = 3
 
 type model struct {
 	width  int
@@ -64,6 +67,11 @@ type model struct {
 	// 锁定时作为 forceRole 传给 StartStream 绕过路由,并在压缩后重注锁定提示对。
 	modelPin      string
 	activeModelID string
+
+	// visionByModel 是各模型(key=模型@base_url)是否支持视觉输入。启动时从 meta 缓存读入垫初值,
+	// 随后由探针回执(visionCapMsg)和运行时自愈(VisionUnsupportedMsg)更新(见 vision.go)。
+	// 取值缺省 false → 发图走 OCR;true → 发图渲染成 base64 内联,不走 OCR。
+	visionByModel map[string]bool
 
 	mode    agent.AgentMode
 	history []agent.ChatMessage
@@ -126,14 +134,12 @@ type model struct {
 	showReasoningModal bool
 	reasoningModalRow  int
 
-	// lastInputClickAt 记录最近一次落在输入框那一行的左键 click 时间戳。
-	// 用来手动检测双击:两次 click 间隔 < 400ms 即视为双击,切换 inputAllSelected。
-	// bubbletea v2 的 MouseClickMsg 不带 Clicks 计数,只能自己算。
-	lastInputClickAt time.Time
-
 	// inputDragging 表示左键在输入框区域按下后还没松开,用来实现"输入框拖拽全选":
 	// 拖动中 → inputAllSelected=true 高亮整段;松手 → 复制输入框内容到剪贴板。
-	inputDragging bool
+	// inputDragStartX/Y 记按下时坐标:只有移动超过阈值(见 inputDragThreshold)才算"真拖动",
+	// 否则双击/点击时的微小抖动会被误判成拖拽 → 误全选。
+	inputDragging                    bool
+	inputDragStartX, inputDragStartY int
 
 	// copyHint 复制成功后的临时提示("✓ 已复制"),叠在鼠标松开的位置 (copyHintX/Y),
 	// 1.5s 后由 copyHintClearMsg 清空。空串 = 不显示。
@@ -376,6 +382,12 @@ func initialModel(models agent.ModelConfig, needsSetup bool, version string, hub
 	mcpMgr := mcp.NewManager()
 	mcpMgr.ConnectAll()
 
+	// 视觉能力:先用缓存里上次的值给本会话垫个初值;每次启动都会重探(见 Init → visionProbeCmds),
+	// 探针结果经 visionCapMsg 回灌当前会话并覆盖缓存。
+	visionByModel := loadVisionCaps(models)
+	// 粘贴图片缓存:跟 OCR 解耦后改由这里按时效清理(超过 7 天的旧图删掉),不阻塞启动。
+	go tools.SweepPasteCache(7 * 24 * time.Hour)
+
 	m := model{
 		mcpMgr:          mcpMgr,
 		mcpAddInput:     mi,
@@ -385,6 +397,7 @@ func initialModel(models agent.ModelConfig, needsSetup bool, version string, hub
 		chatViewport:    vp,
 		input:           ti,
 		models:          models,
+		visionByModel:   visionByModel,
 		activeModelRole: role,
 		activeModelID:   activeID,
 		modelPin:        "auto",
@@ -626,9 +639,13 @@ func (m model) submitUserInput(input string) (model, tea.Cmd) {
 	workspace, _ := os.Getwd()
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancelAgent = cancel
+	// 把各模型的视觉能力塞进传给 agent 的配置:agent 发带图请求前据此渲染 base64 / 路径+OCR。
+	models := m.models
+	models.Flash.Vision = m.visionByModel[modelCapKey(models.Flash)]
+	models.Pro.Vision = m.visionByModel[modelCapKey(models.Pro)]
 	cmd, ch := agent.StartStream(
 		ctx,
-		m.models,
+		models,
 		m.history,
 		m.mode,
 		workspace,
@@ -650,6 +667,8 @@ func (m model) Init() tea.Cmd {
 	if m.pendingCompactSys != "" {
 		cmds = append(cmds, m.restartCompactionCmd())
 	}
+	// 视觉能力探测:每次启动对各模型重探一次(见 vision.go),结果经 visionCapMsg 回灌。
+	cmds = append(cmds, visionProbeCmds(m.models)...)
 	return tea.Batch(cmds...)
 }
 
@@ -726,19 +745,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		inInput := msg.Y >= vpH && msg.Y < m.height && msg.X >= 0 && msg.X < m.width
 
 		if inInput {
-			// 双击切换全选;单击进入输入区:清 chat 选区 + 起一次"拖拽全选"。
-			now := time.Now()
-			if !m.lastInputClickAt.IsZero() && now.Sub(m.lastInputClickAt) < 400*time.Millisecond {
-				if m.input.Value() != "" {
-					m.inputAllSelected = !m.inputAllSelected
-				}
-				m.lastInputClickAt = time.Time{} // 清零,避免三击当成第二次双击
-			} else {
-				m.lastInputClickAt = now
-				m.inputDragging = true // 后续 MouseMotion 一动就全选
-				if m.selecting {
-					m.selecting = false
-				}
+			// 单击进入输入区:清 chat 选区 + 记下拖拽起点(双击全选已移除;全选只走 Ctrl+Shift+A
+			// 或真拖动)。后续 MouseMotion 要移动超过阈值才判定为拖拽全选,避免双击抖动误触。
+			m.inputDragging = true
+			m.inputDragStartX, m.inputDragStartY = msg.X, msg.Y
+			if m.selecting {
+				m.selecting = false
 			}
 			m.refreshViewport()
 			return m, nil
@@ -770,9 +782,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		chatRight := chatLeft + leftW
 		chatBottom := chatTop + vpH
 
-		// 输入框拖拽:一旦移动就全选高亮(输入框内容通常一行/几行,直接整段选)。
+		// 输入框拖拽全选:必须是"真拖动"——横向移过 inputDragThreshold 格,或换了行——才整段选高亮。
+		// 这样双击/点击时一两格的抖动不会被误判成拖拽。输入框内容通常一行/几行,够阈值就直接整段选。
 		if m.inputDragging {
-			if m.input.Value() != "" && !m.inputAllSelected {
+			dx := msg.X - m.inputDragStartX
+			if dx < 0 {
+				dx = -dx
+			}
+			realDrag := dx >= inputDragThreshold || msg.Y != m.inputDragStartY
+			if realDrag && m.input.Value() != "" && !m.inputAllSelected {
 				m.inputAllSelected = true
 				m.refreshViewport()
 			}
@@ -1398,6 +1416,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 
+	case visionCapMsg:
+		// 视觉能力探测回执:更新当前会话的能力表(立刻影响后续发图走 base64 还是 OCR)+ 覆盖缓存。
+		m.applyVisionCap(msg)
+		return m, nil
+
+	case agent.VisionUnsupportedMsg:
+		// 运行时自愈:某模型实际拒绝图片(agent 已自动改 OCR 重发)→ 把它标记为无视觉、纠正缓存,
+		// 下次发图不再对它用 base64。
+		m.applyVisionCap(visionCapMsg{key: msg.Model + "@" + msg.BaseURL, vision: false})
+		return m, nil
+
 	case upgradeCheckResult:
 		// 后台升级检查回执:有错就静默忽略,有结果就跟当前版本比一下。
 		// 有新版本时:右栏 banner 下方版本行常驻显示 ↑ 提示;chat 区追加一条 System 消息
@@ -1834,19 +1863,14 @@ func (m model) buildUserMessage(text string) agent.ChatMessage {
 	if len(m.attachedImagePaths) == 0 {
 		return agent.ChatMessage{Role: "user", Content: text}
 	}
-	replaced := imagePlaceholderRe.ReplaceAllStringFunc(text, func(match string) string {
-		// match 形如 "[Image #1]";提取数字索引
-		sub := imagePlaceholderRe.FindStringSubmatch(match)
-		if len(sub) < 2 {
-			return match
-		}
-		idx, _ := strconv.Atoi(sub[1])
-		if idx < 1 || idx > len(m.attachedImagePaths) {
-			return match
-		}
-		return m.attachedImagePaths[idx-1]
-	})
-	return agent.ChatMessage{Role: "user", Content: replaced}
+	// 有图:消息只携带"文本(含 [Image #N] 占位符)+ 图片路径",**不在这里决定 base64 还是 OCR**。
+	// 具体怎么发(视觉模型 base64 / 非视觉模型路径+OCR)由 agent 发请求前按"当轮实际模型"渲染
+	// (见 agent.renderConvoImages)—— 这样模型中途切换也能正确降级,且历史只存路径不存 base64。
+	return agent.ChatMessage{
+		Role:       "user",
+		Content:    text,
+		ImagePaths: append([]string(nil), m.attachedImagePaths...),
+	}
 }
 
 // saveAttachedImage 把刚粘贴的 PNG 字节写到 ~/.deepx/ocr/cache/ 下的新文件,
@@ -1915,16 +1939,43 @@ func (m *model) appendChat(role, text string) {
 //   - system: 跳过
 //
 // 不写 m.history、不写 session.gob —— 仅是显示通道,改这里不影响 LLM 缓存。
+// chatDisplayText 取一条消息用于"对话区显示"的文本:优先用 Content(新格式:文本含 [Image #N]);
+// 若 Content 为空(老格式:base64 直接内联在 ContentParts 里),则从 ContentParts 拼出文本、
+// 用 [图片] 占位图片 —— 避免老 gob 重新加载时这条消息显示成空白。
+func chatDisplayText(msg agent.ChatMessage) string {
+	if msg.Content != "" {
+		return msg.Content
+	}
+	var sb strings.Builder
+	for _, p := range msg.ContentParts {
+		var seg string
+		switch p.Type {
+		case "text":
+			seg = p.Text
+		case "image_url":
+			seg = "[图片]"
+		}
+		if seg == "" {
+			continue
+		}
+		if sb.Len() > 0 {
+			sb.WriteString(" ")
+		}
+		sb.WriteString(seg)
+	}
+	return sb.String()
+}
+
 func rebuildChatFromHistory(cl *chatLog, history []agent.ChatMessage) {
 	for _, msg := range history {
 		switch msg.Role {
 		case "user":
-			if msg.Content != "" {
-				cl.Open(kindUser, msg.Content)
+			if t := chatDisplayText(msg); t != "" {
+				cl.Open(kindUser, t)
 			}
 		case "assistant":
-			if msg.Content != "" {
-				cl.Open(kindAssistant, msg.Content)
+			if t := chatDisplayText(msg); t != "" {
+				cl.Open(kindAssistant, t)
 			}
 			// 工具调用行:同 ToolCallStartMsg,连续 tool_call 归并到同一段(同 kind)。
 			// tools 段跳过 markdown 渲染,单 \n 即可保证每条单独一行。

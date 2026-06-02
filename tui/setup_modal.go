@@ -170,6 +170,8 @@ func (m *model) submitSetup() tea.Cmd {
 		m.activeModelRole = "pro"
 		m.activeModelID = m.models.Pro.Model
 	}
+	// 模型换了:视觉能力可能变,重置 —— 先用新模型的缓存值垫初值,下面返回探测命令立刻重探。
+	m.visionByModel = loadVisionCaps(m.models)
 	// 重置 modal 状态
 	m.showSetup = false
 	m.setupRequired = false
@@ -181,7 +183,8 @@ func (m *model) submitSetup() tea.Cmd {
 	path, _ := config.Path()
 	// 反斜杠转义已在 renderMarkdown 渲染层统一处理(见 backslashSentinel),这里不必再包反引号。
 	m.appendChat("System", T("setup.saved_to")+path)
-	return nil
+	// 对新配置的模型重探视觉能力(结果经 visionCapMsg 回灌当前会话 + 覆盖缓存)。
+	return tea.Batch(visionProbeCmds(m.models)...)
 }
 
 // openSetupModal 给 /config 命令用:把当前面板切到 modal,允许 Esc 取消。

@@ -35,6 +35,9 @@ type ModelEntry struct {
 	// 都不会被多余字段炸 400。用户主动设了才往 chat/completions 请求体里塞。
 	ReasoningEffort string `yaml:"reasoning_effort,omitempty"` // "low" / "medium" / "high"
 	Thinking        string `yaml:"thinking,omitempty"`         // "enabled" / "disabled"
+	// Vision 不是配置项(yaml:"-" 不读不写),只为和 agent.ModelEntry 保持整体可互转。
+	// 模型是否支持视觉由运行时探测决定(见 tui 视觉探测),不进 model.yaml。
+	Vision bool `yaml:"-"`
 }
 
 // WebConfig 本地 web dashboard 配置。

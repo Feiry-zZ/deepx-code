@@ -13,10 +13,20 @@ import (
 // 之前分散在 ~/.deepx/lang(纯文本)和 ~/.deepx/upgrade_check.json(JSON)两个文件,
 // 现在收口到一个文件,新增全局配置项直接往这里加字段即可。
 type meta struct {
-	Lang             string    `json:"lang,omitempty"`               // "zh" / "en"
+	Lang             string    `json:"lang,omitempty"`              // "zh" / "en"
 	UpgradeCheckedAt time.Time `json:"upgrade_checked_at,omitzero"` // 上次打 GitHub API 的时间
-	LatestVersion    string    `json:"latest_version,omitempty"`     // 最近一次拿到的 latest tag(去 v 前缀)
-	UpgradeURL       string    `json:"upgrade_url,omitempty"`        // release 页 URL
+	LatestVersion    string    `json:"latest_version,omitempty"`    // 最近一次拿到的 latest tag(去 v 前缀)
+	UpgradeURL       string    `json:"upgrade_url,omitempty"`       // release 页 URL
+
+	// ModelCaps 缓存每个 "模型@base_url" 探测出的能力。启动时按 key 查:命中即用、不重探;
+	// 未命中才发一次最小探测(agent.ProbeVision),结果写回这里,下次启动直接命中。
+	// 能力按维度拆开(本期只做 vision,预留 video / audio),不用笼统的 multimodal。
+	ModelCaps map[string]modelCaps `json:"model_caps,omitempty"`
+}
+
+// modelCaps 是单个模型探测出的能力位,按维度独立存。
+type modelCaps struct {
+	Vision bool `json:"vision"`
 }
 
 var (
