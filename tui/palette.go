@@ -30,6 +30,8 @@ func slashCommands() []struct{ name, desc string } {
 		{"/mcp-delete", T("cmd.mcp-delete.desc")},
 		{"/lang", T("cmd.lang.desc")},
 		{"/compact", T("cmd.compact.desc")},
+		{"/new", T("cmd.new.desc")},
+		{"/sessions", T("cmd.sessions.desc")},
 		{"/undo", T("cmd.undo.desc")},
 		{"/help", T("cmd.help.desc")},
 	}

@@ -133,6 +133,46 @@ var translations = map[string]map[Lang]string{
 		LangZH: "正在生成中,先按 Esc 停止再 /undo",
 		LangEN: "Still streaming — press Esc to stop, then /undo",
 	},
+	"cmd.new.desc": {
+		LangZH: "开启一个全新对话(当前对话已保存,可在 /sessions 找回)",
+		LangEN: "Start a brand-new conversation (current one is saved, see /sessions)",
+	},
+	"cmd.sessions.desc": {
+		LangZH: "历史对话列表:↑/↓ 选择,Enter 切换",
+		LangEN: "Conversation history: ↑/↓ select, Enter switch",
+	},
+	"session.new": {
+		LangZH: "✨ 已开启全新对话。上一段对话已保存,/sessions 可找回。",
+		LangEN: "✨ Started a new conversation. The previous one is saved — see /sessions.",
+	},
+	"session.switched": {
+		LangZH: "↩ 已切换到对话:%s",
+		LangEN: "↩ Switched to conversation: %s",
+	},
+	"session.streaming": {
+		LangZH: "正在生成中,先按 Esc 停止再切换/新建对话",
+		LangEN: "Still streaming — press Esc to stop before switching/new conversation",
+	},
+	"session.modal.title": {
+		LangZH: "历史对话",
+		LangEN: "Conversations",
+	},
+	"session.modal.footer": {
+		LangZH: "↑/↓ 选择 · Enter 切换 · Esc 取消",
+		LangEN: "↑/↓ select · Enter switch · Esc cancel",
+	},
+	"session.modal.empty": {
+		LangZH: "(暂无历史对话)",
+		LangEN: "(no conversations yet)",
+	},
+	"session.untitled": {
+		LangZH: "(未命名)",
+		LangEN: "(untitled)",
+	},
+	"session.current": {
+		LangZH: "当前对话",
+		LangEN: "current",
+	},
 	"cmd.help.desc": {
 		LangZH: "帮助",
 		LangEN: "Help",
@@ -152,6 +192,8 @@ var translations = map[string]map[Lang]string{
 			"- `/lang` — 切换语言 (中/英)\n" +
 			"- `/reasoning` — 设置 thinking / reasoning_effort(per-role,空值不发)\n" +
 			"- `/compact` — 手动压缩会话历史(保留尾部 20%)\n" +
+			"- `/new` — 开启全新对话(当前对话已保存,可在 /sessions 找回)\n" +
+			"- `/sessions` — 历史对话列表(↑/↓ 选,Enter 切换)\n" +
 			"- `/undo` — 撤销上一轮对话(原输入回填输入框)\n" +
 			"- `/help` — 帮助\n\n" +
 			"**输入**\n\n" +
@@ -174,6 +216,8 @@ var translations = map[string]map[Lang]string{
 			"- `/lang` — Switch language (zh/en)\n" +
 			"- `/reasoning` — Set thinking / reasoning_effort (per-role, empty = don't send)\n" +
 			"- `/compact` — Manually compact session history (keep last 20%)\n" +
+			"- `/new` — Start a brand-new conversation (current one is saved, see /sessions)\n" +
+			"- `/sessions` — Conversation history (↑/↓ select, Enter switch)\n" +
 			"- `/undo` — Undo the last exchange (restores your input)\n" +
 			"- `/help` — Help\n\n" +
 			"**Input**\n\n" +

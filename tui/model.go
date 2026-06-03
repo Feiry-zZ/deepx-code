@@ -233,6 +233,11 @@ type model struct {
 	skillDelNames   []string
 	skillDelIdx     int
 
+	// /sessions 历史对话列表模态。
+	showSessionList bool
+	sessionConvs    []session.ConvInfo
+	sessionListIdx  int
+
 	// 版本信息。version 是 build 时注入的当前版本号(go build 默认 "dev")。
 	// latestVersion 是异步检查得到的 GitHub latest release,空则没检查到 / 网络失败。
 	// upgradeAvailable 由 versionNewer(latestVersion, version) 算出,渲染时用来决定是否
@@ -453,6 +458,13 @@ func initialModel(models agent.ModelConfig, needsSetup bool, version string, hub
 			}
 			m.history = gobHistory
 			rebuildChatFromHistory(m.chatContent, gobHistory)
+			// 老对话(升级前就有 history、没 conv.json)首次进 /sessions 别显示"(未命名)":
+			// 用第一条用户消息回填标题。session 包自己解码不了 history.gob,放这儿做。
+			if sess.ConvTitle() == "" {
+				if t := firstUserText(gobHistory); t != "" {
+					sess.SetConvTitle(truncTitle(t, 40))
+				}
+			}
 		}
 
 		if !gobOK {
@@ -605,6 +617,8 @@ func (m model) submitUserInput(input string) (model, tea.Cmd) {
 	userMsg := m.buildUserMessage(input)
 	m.appendChat("You", input)
 	m.history = append(m.history, userMsg)
+	// 对话还没标题时,用首条用户输入当标题(给 /sessions 列表显示)。
+	m.maybeSetConvTitle(input)
 	// 用户输入先暂存,本轮成功后(StreamDoneMsg)才写 jsonl —— 失败的轮次不留孤儿记录。
 	m.pendingUserText = input
 	m.broadcast(web.Event{Kind: "user_message", Text: input})
@@ -717,7 +731,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.MouseWheelMsg:
 		// modal 期间忽略
-		if m.showSetup || m.showLangModal || m.showModelModal || m.showReasoningModal {
+		if m.showSetup || m.showLangModal || m.showModelModal || m.showReasoningModal || m.showSessionList {
 			return m, nil
 		}
 		// 滚轮: 转给 viewport,顺便取消选区
@@ -729,7 +743,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, c
 
 	case tea.MouseClickMsg:
-		if m.showSetup || m.showLangModal || m.showModelModal || m.showReasoningModal {
+		if m.showSetup || m.showLangModal || m.showModelModal || m.showReasoningModal || m.showSessionList {
 			return m, nil
 		}
 		if msg.Button != tea.MouseLeft {
@@ -779,7 +793,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.MouseMotionMsg:
-		if m.showSetup || m.showLangModal || m.showModelModal || m.showReasoningModal {
+		if m.showSetup || m.showLangModal || m.showModelModal || m.showReasoningModal || m.showSessionList {
 			return m, nil
 		}
 		if msg.Button != tea.MouseLeft {
@@ -845,7 +859,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.MouseReleaseMsg:
-		if m.showSetup || m.showLangModal || m.showModelModal || m.showReasoningModal {
+		if m.showSetup || m.showLangModal || m.showModelModal || m.showReasoningModal || m.showSessionList {
 			return m, nil
 		}
 		if msg.Button != tea.MouseLeft {
@@ -1158,6 +1172,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			case "esc", "ctrl+c":
 				m.showSkillDelete = false
+				m.input.Focus()
+				return m, nil
+			}
+			return m, nil
+		}
+
+		// /sessions 历史对话列表:↑/↓ 选,Enter 切换,Esc 取消
+		if m.showSessionList {
+			switch msg.String() {
+			case "up", "k":
+				if m.sessionListIdx > 0 {
+					m.sessionListIdx--
+				}
+				return m, nil
+			case "down", "j":
+				if m.sessionListIdx < len(m.sessionConvs)-1 {
+					m.sessionListIdx++
+				}
+				return m, nil
+			case "enter":
+				m.submitSessionSwitch()
+				return m, nil
+			case "esc", "ctrl+c":
+				m.showSessionList = false
 				m.input.Focus()
 				return m, nil
 			}
@@ -2086,6 +2124,10 @@ func (m *model) handleSlashCommand(input string) tea.Cmd {
 		}
 	case "/compact":
 		return m.startManualCompaction()
+	case "/new":
+		m.startNewConversation()
+	case "/sessions":
+		m.openSessionListModal()
 	case "/undo":
 		m.undoLastTurn()
 	case "/help":
