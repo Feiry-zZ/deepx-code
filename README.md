@@ -119,10 +119,17 @@ deepx exec "把 README 的功能列表翻译成英文,写到 README.en.md"
 ```
 ~/.deepx/sessions/<sha1(workspace)[:16]>/
 ├── meta.json          # 工作区元信息
+├── current            # 当前对话指针(空/"default" = 默认对话 = 本目录)
 ├── state.json         # 压缩状态 + 用量快照
-├── YYYY-MM-DD.jsonl   # 文本日志（Memory 搜索用）
-└── history.gob        # 二进制完整历史
+├── YYYY-MM-DD.jsonl   # 文本日志（Memory 搜索用，跨对话）
+├── history.gob        # 默认对话的完整历史
+└── conversations/     # /new 开的其它对话(各自独立 history.gob / summary / state)
+    └── <id>/ ...
 ```
+
+> 多对话:默认对话就是本目录(老数据零迁移),`/new` 开新对话、`/sessions` 列表切换。
+
+
 
 | 格式               | 存储内容                                                                | 用途                       |
 | :----------------- | :---------------------------------------------------------------------- | :------------------------- |
@@ -216,6 +223,7 @@ CreatePlan
 | `/model`                   | 弹窗选择模型（auto 按任务路由 / flash / pro 定死）；也可 `/model flash` 直接指定 |
 | `/reasoning`               | 弹窗设置 `thinking` / `reasoning_effort`（flash/pro 各自独立；空值=不发该字段，对 MiMo 等不支持的模型零侵入） |
 | `/compact`                 | 手动压缩会话以节省上下文          |
+| `/new` `/sessions`         | 开启全新对话 / 历史对话列表（↑↓ 选，Enter 切换） |
 | `/lang`                    | 切换界面语言（中 / 英）           |
 | `/mcp-list` `/mcp-add` `/mcp-delete` | 管理 MCP server         |
 | `/skills` `/config` `/mode`| 列出 skill / 重配 key / 查看模式  |

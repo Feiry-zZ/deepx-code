@@ -46,6 +46,10 @@ type Manager struct {
 	workspace string
 	sessionID string
 	rootDir   string // ~/.deepx/sessions/{sessionID}
+	// convDir 是"当前对话"目录:对话相关文件(history.gob / summary / state.json / last_prompt /
+	// last_tools)都在这里读写。默认对话 = rootDir 本身(零迁移,老数据原地不动);
+	// /new 出来的新对话 = rootDir/conversations/{id}。jsonl 与 meta.json 始终在 rootDir(workspace 级)。
+	convDir string
 }
 
 // metaFile 是 ~/.deepx/sessions/{sid}/meta.json 的结构。
@@ -68,18 +72,19 @@ type stateFile struct {
 }
 
 // 大块裸文件名(无后缀,直接读写内容):
-//   summaryFile     — 会话压缩摘要(纯文本)
-//   lastPromptFile  — 上次实际发送的 system 文本(纯文本,压缩时复刻旧前缀)
-//   lastToolsFile   — 上次实际发送的 tool specs(裸 JSON,不被二次转义)
+//
+//	summaryFile     — 会话压缩摘要(纯文本)
+//	lastPromptFile  — 上次实际发送的 system 文本(纯文本,压缩时复刻旧前缀)
+//	lastToolsFile   — 上次实际发送的 tool specs(裸 JSON,不被二次转义)
 const (
 	summaryFile    = "summary"
 	lastPromptFile = "last_prompt"
 	lastToolsFile  = "last_tools"
 )
 
-// writeRaw 原子写一个裸文件(write-then-rename)。失败静默。
+// writeRaw 原子写一个对话级裸文件(write-then-rename)到 convDir。失败静默。
 func (m *Manager) writeRaw(name, content string) {
-	path := filepath.Join(m.rootDir, name)
+	path := filepath.Join(m.convDir, name)
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, []byte(content), 0o644); err != nil {
 		return
@@ -87,9 +92,9 @@ func (m *Manager) writeRaw(name, content string) {
 	_ = os.Rename(tmp, path)
 }
 
-// readRaw 读一个裸文件,不存在返回空串。
+// readRaw 读一个对话级裸文件(convDir),不存在返回空串。
 func (m *Manager) readRaw(name string) string {
-	data, err := os.ReadFile(filepath.Join(m.rootDir, name))
+	data, err := os.ReadFile(filepath.Join(m.convDir, name))
 	if err != nil {
 		return ""
 	}
@@ -125,6 +130,8 @@ func New(workspace string) (*Manager, error) {
 	}
 
 	m := &Manager{workspace: abs, sessionID: sid, rootDir: root}
+	m.convDir = root               // 安全默认:即"默认对话"=rootDir(老数据原地)
+	m.convDir = m.resolveConvDir() // 按 current 指针定位当前对话(见 conversation.go)
 	m.touchMeta()
 	return m, nil
 }
@@ -162,7 +169,7 @@ func (m *Manager) SaveSummary(text string) error {
 func (m *Manager) SavePrefixSnapshot(sig, model, systemPrompt, toolSpecsJSON string) {
 	m.writeRaw(lastPromptFile, systemPrompt)
 	m.writeRaw(lastToolsFile, toolSpecsJSON)
-	path := filepath.Join(m.rootDir, "state.json")
+	path := filepath.Join(m.convDir, "state.json")
 	var s stateFile
 	if data, err := os.ReadFile(path); err == nil {
 		_ = json.Unmarshal(data, &s)
@@ -176,7 +183,7 @@ func (m *Manager) SavePrefixSnapshot(sig, model, systemPrompt, toolSpecsJSON str
 // PrefixSnapshotTime 返回前缀快照(last_prompt)最后写入的时间,即"上次请求实际发送"的时刻 ——
 // 用于判断 DeepSeek 缓存是否还可能热。文件不存在返回 (零值, false)。
 func (m *Manager) PrefixSnapshotTime() (time.Time, bool) {
-	fi, err := os.Stat(filepath.Join(m.rootDir, lastPromptFile))
+	fi, err := os.Stat(filepath.Join(m.convDir, lastPromptFile))
 	if err != nil {
 		return time.Time{}, false
 	}
@@ -185,7 +192,7 @@ func (m *Manager) PrefixSnapshotTime() (time.Time, bool) {
 
 // LoadPrefixSnapshot 读取上次的前缀快照(签名/model 来自 state.json,system/tools 来自裸文件)。
 func (m *Manager) LoadPrefixSnapshot() (sig, model, systemPrompt, toolSpecsJSON string) {
-	path := filepath.Join(m.rootDir, "state.json")
+	path := filepath.Join(m.convDir, "state.json")
 	if data, err := os.ReadFile(path); err == nil {
 		var s stateFile
 		if json.Unmarshal(data, &s) == nil {
@@ -199,7 +206,7 @@ func (m *Manager) LoadPrefixSnapshot() (sig, model, systemPrompt, toolSpecsJSON 
 // SaveUsage 写入 last_usage 字段。失败静默,不影响主流程。
 // 复用 state.json,避免再多一个文件。
 func (m *Manager) SaveUsage(promptTokens, completionTokens, cacheHit, cacheMiss int) {
-	path := filepath.Join(m.rootDir, "state.json")
+	path := filepath.Join(m.convDir, "state.json")
 	var s stateFile
 	if data, err := os.ReadFile(path); err == nil {
 		_ = json.Unmarshal(data, &s)
@@ -216,7 +223,7 @@ func (m *Manager) SaveUsage(promptTokens, completionTokens, cacheHit, cacheMiss 
 
 // LoadUsage 读 last_usage 字段。文件/字段缺失返回 nil。
 func (m *Manager) LoadUsage() *Usage {
-	path := filepath.Join(m.rootDir, "state.json")
+	path := filepath.Join(m.convDir, "state.json")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil
@@ -234,7 +241,7 @@ func (m *Manager) LoadSummary() string {
 		return s
 	}
 	var st stateFile // 旧格式回退
-	if data, err := os.ReadFile(filepath.Join(m.rootDir, "state.json")); err == nil {
+	if data, err := os.ReadFile(filepath.Join(m.convDir, "state.json")); err == nil {
 		_ = json.Unmarshal(data, &st)
 	}
 	return st.Summary
@@ -243,7 +250,7 @@ func (m *Manager) LoadSummary() string {
 // SaveGob 以 gob 格式将 v 编码到 filename,写入 session 目录。原子写(write-then-rename)。
 // 文件头带 4 字节魔数 DXP1,用于版本校验。
 func (m *Manager) SaveGob(filename string, v any) error {
-	path := filepath.Join(m.rootDir, filename)
+	path := filepath.Join(m.convDir, filename)
 	tmpPath := path + ".tmp"
 	f, err := os.Create(tmpPath)
 	if err != nil {
@@ -273,7 +280,7 @@ func (m *Manager) SaveGob(filename string, v any) error {
 // LoadGob 从 session 目录的 filename 读 gob 编码,解码到 v。
 // 魔数不匹配或文件不存在均返回 error。
 func (m *Manager) LoadGob(filename string, v any) error {
-	path := filepath.Join(m.rootDir, filename)
+	path := filepath.Join(m.convDir, filename)
 	f, err := os.Open(path)
 	if err != nil {
 		return err
