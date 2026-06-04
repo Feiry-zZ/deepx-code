@@ -244,8 +244,7 @@ type model struct {
 	// docker 沙箱镜像拉取进度(/sandbox docker 切换时,镜像不在本地才拉)。
 	dockerPulling    bool
 	dockerPullImage  string
-	dockerPullDone   int
-	dockerPullTotal  int
+	dockerPullDots   int // 省略号动画计数(无百分比,只表示"进行中")
 	dockerPullCancel context.CancelFunc
 
 	// 版本信息。version 是 build 时注入的当前版本号(go build 默认 "dev")。
@@ -1664,24 +1663,27 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.copyHint = ""
 		return m, nil
 
-	case dockerPullMsg:
+	case dockerPullDoneMsg:
 		if !m.dockerPulling {
 			return m, nil // 已被取消
 		}
-		if msg.p.Finished {
-			m.dockerPulling = false
-			m.dockerPullCancel = nil
-			if msg.p.Err != nil {
-				m.appendChat("System", fmt.Sprintf(T("sandbox.pull_failed"), msg.p.Err))
-			} else {
-				m.activateDockerSandbox(m.dockerPullImage) // 镜像就绪,正式切 docker
-			}
-			m.refreshViewport()
-			return m, nil
+		m.dockerPulling = false
+		m.dockerPullCancel = nil
+		if msg.err != nil {
+			m.appendChat("System", fmt.Sprintf(T("sandbox.pull_failed"), msg.err))
+		} else {
+			m.activateDockerSandbox(m.dockerPullImage) // 镜像就绪,正式切 docker
 		}
-		m.dockerPullDone, m.dockerPullTotal = msg.p.Done, msg.p.Layers
 		m.refreshViewport()
-		return m, listenDockerPull(msg.ch) // 续听下一条进度
+		return m, nil
+
+	case dockerPullTickMsg:
+		if !m.dockerPulling {
+			return m, nil // 拉取已结束/取消,停止动画
+		}
+		m.dockerPullDots++
+		m.refreshViewport()
+		return m, dockerPullTickCmd() // 续帧
 
 	case agent.HistoryUpdateMsg:
 		if m.streamCh == nil {
@@ -2300,9 +2302,10 @@ func (m *model) handleSandboxCommand(input string) tea.Cmd {
 		m.dockerPullCancel = cancel
 		m.dockerPulling = true
 		m.dockerPullImage = image
-		m.dockerPullDone, m.dockerPullTotal = 0, 0
+		m.dockerPullDots = 0
 		m.refreshViewport()
-		return listenDockerPull(tools.PullImage(ctx, image))
+		// 一边等拉取结果,一边跑省略号动画
+		return tea.Batch(waitDockerPull(tools.PullImage(ctx, image)), dockerPullTickCmd())
 	default:
 		m.appendChat("assistant", fmt.Sprintf(T("sandbox.unknown"), fields[0]))
 	}
@@ -2600,9 +2603,9 @@ func (m *model) renderChatBaseContent(w int) string {
 	if m.plan != nil && m.streaming && !m.plan.allFinished() {
 		content += "\n" + indentBlock(renderPlanForChat(m.plan), "  ")
 	}
-	// docker 镜像拉取进度条:拉取期间挂在对话区末尾,随进度刷新;拉完即撤(dockerPulling 置回 false)。
+	// docker 镜像拉取动画:拉取期间挂在对话区末尾,随 tick 刷新省略号;拉完即撤(dockerPulling 置回 false)。
 	if m.dockerPulling {
-		content += "\n" + dockerPullBar(m.dockerPullImage, m.dockerPullDone, m.dockerPullTotal)
+		content += "\n" + dockerPullText(m.dockerPullImage, m.dockerPullDots)
 	}
 	// 思考动画不再画在 chat 末尾 —— 已统一移到输入框上方的活动状态行(statusFooterLine),
 	// 避免一次 thinking 出现在两个地方。

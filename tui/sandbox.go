@@ -3,41 +3,28 @@ package tui
 import (
 	"fmt"
 	"strings"
-
-	"deepx/tools"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 )
 
-// docker 镜像拉取的 TUI 侧:异步拉取的进度经 dockerPullMsg 流回 Update,驱动对话区进度条。
+// docker 镜像拉取的 TUI 侧:不显示百分比(非 TTY 下 docker 不吐字节进度,百分比会一直 0%),
+// 只在对话区显示"🐳 拉取镜像 X ···"+循环动画点;拉取结束(成功/失败)由 dockerPullDoneMsg 通知。
 
-type dockerPullMsg struct {
-	p  tools.PullProgress
-	ch <-chan tools.PullProgress
+type dockerPullDoneMsg struct{ err error } // 拉取结束:err==nil 即成功
+type dockerPullTickMsg struct{}            // 动画 tick:推进省略号
+
+// waitDockerPull 阻塞等拉取结果(只一条),转成 dockerPullDoneMsg。
+func waitDockerPull(ch <-chan error) tea.Cmd {
+	return func() tea.Msg { return dockerPullDoneMsg{err: <-ch} }
 }
 
-// listenDockerPull 读一条拉取进度;channel 关闭则视为结束。每收到一条非结束进度,Update 会再调一次它续听。
-func listenDockerPull(ch <-chan tools.PullProgress) tea.Cmd {
-	return func() tea.Msg {
-		p, ok := <-ch
-		if !ok {
-			return dockerPullMsg{p: tools.PullProgress{Finished: true}}
-		}
-		return dockerPullMsg{p: p, ch: ch}
-	}
+// dockerPullTickCmd 每 400ms 发一次 tick,驱动省略号动画。
+func dockerPullTickCmd() tea.Cmd {
+	return tea.Tick(400*time.Millisecond, func(time.Time) tea.Msg { return dockerPullTickMsg{} })
 }
 
-// dockerPullBar 渲染一行拉取进度条:🐳 拉取镜像 ubuntu:24.04 [████░░] 50% · 4/8 层。
-func dockerPullBar(image string, done, total int) string {
-	const width = 16
-	pct := 0
-	if total > 0 {
-		pct = done * 100 / total
-	}
-	filled := pct * width / 100
-	if filled > width {
-		filled = width
-	}
-	bar := strings.Repeat("█", filled) + strings.Repeat("░", width-filled)
-	return fmt.Sprintf("🐳 "+T("sandbox.pulling")+" %s  [%s] %d%%  · %d/%d", image, bar, pct, done, total)
+// dockerPullText 渲染"🐳 拉取镜像 X ···",点数随 dots 在 1..3 间循环。
+func dockerPullText(image string, dots int) string {
+	return fmt.Sprintf("🐳 "+T("sandbox.pulling")+" %s %s", image, strings.Repeat("·", 1+dots%3))
 }

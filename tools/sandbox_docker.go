@@ -1,7 +1,6 @@
 package tools
 
 import (
-	"bufio"
 	"context"
 	"crypto/sha1"
 	"encoding/hex"
@@ -160,15 +159,6 @@ func containerWorkdir(cwd string) string {
 	return dockerMount + "/" + filepath.ToSlash(rel)
 }
 
-// PullProgress 是一次镜像拉取的进度。Layers=已发现层数,Done=已完成层数(Pull complete/Already exists)。
-// Finished=拉取结束(成功或失败),Err 非空表示失败。
-type PullProgress struct {
-	Layers   int
-	Done     int
-	Finished bool
-	Err      error
-}
-
 // ImagePresent 判断镜像是否本地已有(有则无需拉取)。
 func ImagePresent(image string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -176,70 +166,28 @@ func ImagePresent(image string) bool {
 	return exec.CommandContext(ctx, "docker", "image", "inspect", image).Run() == nil
 }
 
-// PullImage 异步 `docker pull <image>`,把按层进度流式写入返回的 channel(结束后关闭)。
-// 进度按"完成层数/已发现层数"算(层级粒度,跨平台、不依赖 docker API)。镜像已存在则直接发 Finished。
-func PullImage(ctx context.Context, image string) <-chan PullProgress {
-	ch := make(chan PullProgress, 32)
+// PullImage 异步 `docker pull <image>`:拉完把结果发到 channel(nil=成功)再关闭;镜像已存在直接发 nil。
+// 不解析进度——非 TTY 下 docker 不吐字节进度(进度条会一直 0%),UI 改用"拉取中…"动画,这里只关心成败。
+func PullImage(ctx context.Context, image string) <-chan error {
+	ch := make(chan error, 1)
 	go func() {
 		defer close(ch)
 		if ImagePresent(image) {
-			ch <- PullProgress{Finished: true}
+			ch <- nil
 			return
 		}
-		cmd := exec.CommandContext(ctx, "docker", "pull", image)
-		stdout, err := cmd.StdoutPipe()
+		out, err := exec.CommandContext(ctx, "docker", "pull", image).CombinedOutput()
 		if err != nil {
-			ch <- PullProgress{Finished: true, Err: err}
-			return
-		}
-		var stderr strings.Builder
-		cmd.Stderr = &stderr
-		if err := cmd.Start(); err != nil {
-			ch <- PullProgress{Finished: true, Err: err}
-			return
-		}
-		total := map[string]bool{}
-		done := map[string]bool{}
-		sc := bufio.NewScanner(stdout)
-		sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-		for sc.Scan() {
-			id, status, ok := parseLayerLine(sc.Text())
-			if !ok {
-				continue
+			if s := strings.TrimSpace(string(out)); s != "" {
+				if i := strings.LastIndexByte(s, '\n'); i >= 0 {
+					s = strings.TrimSpace(s[i+1:]) // 取最后一行,最贴近真正的报错
+				}
+				err = fmt.Errorf("%s", s)
 			}
-			total[id] = true
-			if status == "Pull complete" || status == "Already exists" {
-				done[id] = true
-			}
-			ch <- PullProgress{Layers: len(total), Done: len(done)}
 		}
-		werr := cmd.Wait()
-		if werr != nil && stderr.Len() > 0 {
-			werr = fmt.Errorf("%s", strings.TrimSpace(stderr.String()))
-		}
-		ch <- PullProgress{Layers: len(total), Done: len(done), Finished: true, Err: werr}
+		ch <- err
 	}()
 	return ch
-}
-
-// parseLayerLine 解析 docker pull 的一行 "<id>: <status>…",返回层 id 和状态短语。
-// 只认层级状态行(过滤 "Pulling from …" / "Digest:" / "Status:" 等非层行)。
-func parseLayerLine(line string) (id, status string, ok bool) {
-	i := strings.Index(line, ": ")
-	if i <= 0 {
-		return "", "", false
-	}
-	id = strings.TrimSpace(line[:i])
-	rest := strings.TrimSpace(line[i+2:])
-	for _, s := range []string{
-		"Pull complete", "Already exists", "Pulling fs layer", "Waiting",
-		"Downloading", "Verifying Checksum", "Download complete", "Extracting",
-	} {
-		if strings.HasPrefix(rest, s) {
-			return id, s, true
-		}
-	}
-	return "", "", false
 }
 
 // dockerExecCmd 构造"在容器里跑命令"的 exec.Cmd:确保容器在跑,再 docker exec。
