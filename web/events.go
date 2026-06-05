@@ -34,15 +34,20 @@ type Event struct {
 	Reason  string `json:"reason,omitempty"`
 
 	// plan(整份)/ plan_status(单节点)
-	Plan    []PlanNode `json:"plan,omitempty"`
-	Status  string     `json:"status,omitempty"`
-	Summary string     `json:"summary,omitempty"`
+	Plan     []PlanNode `json:"plan,omitempty"`
+	PlanKind string     `json:"planKind,omitempty"` // "todo"(计划)| "createplan"(步骤)
+	Status   string     `json:"status,omitempty"`
+	Summary  string     `json:"summary,omitempty"`
 
 	// usage
 	Usage *Usage `json:"usage,omitempty"`
 
 	// review_request / review_resolved
 	Approve *bool `json:"approve,omitempty"`
+
+	// sessions(会话列表)/ session_loaded(切换会话后载入的消息)
+	Sessions []SessionInfo `json:"sessions,omitempty"`
+	Messages []Message     `json:"messages,omitempty"`
 }
 
 // PlanNode 是发往前端的 plan DAG 节点。
@@ -80,7 +85,7 @@ func ToWebEvent(msg tea.Msg) (Event, bool) {
 	case agent.ModelSwitchMsg:
 		return Event{Kind: "model_switch", Role: m.Role, ModelID: m.ModelID, Reason: m.Reason}, true
 	case agent.PlanCreatedMsg:
-		return Event{Kind: "plan", Plan: toPlanNodes(m.Plans)}, true
+		return Event{Kind: "plan", Plan: toPlanNodes(m.Plans), PlanKind: m.Kind}, true
 	case agent.TaskStatusMsg:
 		return Event{Kind: "plan_status", ID: m.ID, Status: string(m.Status), Summary: m.Summary}, true
 	case agent.UsageMsg:

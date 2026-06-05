@@ -26,6 +26,17 @@ type Server struct {
 	// OnListFiles 返回工作区文件相对路径列表,供前端 @ 文件选择器使用。由调用方注入
 	// (web 包不能依赖 tui —— tui 已依赖 web,会成环;遍历逻辑在 tui 侧,经回调注入)。
 	OnListFiles func() []string
+
+	// 控制类回调:浏览器点按钮 → 注入回 TUI(同样经 program.Send,走相同 Update 逻辑)。
+	OnNewSession     func()             // 新建会话(/new)
+	OnSwitchSession  func(id string)    // 切换会话(/sessions 点击)
+	OnRenameSession  func(id, title string) // 重命名会话
+	OnDeleteSession  func(id string)    // 删除会话
+	OnSetModel       func(role string) // 路由 auto/flash/pro
+	OnSetMode        func(mode string) // 权限模式 plan/auto/review
+	OnSetSandbox     func(mode string) // 沙箱 off/native/docker
+	OnSetWorkingMode func(mode string) // 工作模式 karpathy/openspec/superpowers
+	OnSetLang        func(lang string) // 界面语言 zh/en
 }
 
 // NewServer 创建 Server,token 随机生成。
@@ -53,6 +64,15 @@ func (s *Server) Serve() error {
 	mux.HandleFunc("/api/review", s.handleReview)
 	mux.HandleFunc("/api/state", s.handleState)
 	mux.HandleFunc("/api/files", s.handleFiles)
+	mux.HandleFunc("/api/new", s.handleNew)
+	mux.HandleFunc("/api/switch", s.handleSwitch)
+	mux.HandleFunc("/api/session-rename", s.handleSessionRename)
+	mux.HandleFunc("/api/session-delete", s.handleSessionDelete)
+	mux.HandleFunc("/api/model", s.handleModel)
+	mux.HandleFunc("/api/mode", s.handleMode)
+	mux.HandleFunc("/api/sandbox", s.handleSandbox)
+	mux.HandleFunc("/api/workingmode", s.handleWorkingMode)
+	mux.HandleFunc("/api/lang", s.handleLang)
 	s.srv = &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	err := s.srv.Serve(s.ln)
 	if err == http.ErrServerClosed {
@@ -214,4 +234,109 @@ func (s *Server) handleFiles(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(files)
+}
+
+// postField 是控制类 POST 端点的公共骨架:校验 auth + method,解析 body 里的 field 字段,
+// 调回调。field 为空字符串时表示无 body(如新建会话),cb 直接调。
+func (s *Server) postField(w http.ResponseWriter, r *http.Request, field string, cb func(string)) {
+	if !s.authed(r) || r.Method != http.MethodPost {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	val := ""
+	if field != "" {
+		var body map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		val = body[field]
+	}
+	if cb != nil {
+		cb(val)
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleNew(w http.ResponseWriter, r *http.Request) {
+	s.postField(w, r, "", func(string) {
+		if s.OnNewSession != nil {
+			s.OnNewSession()
+		}
+	})
+}
+
+func (s *Server) handleSwitch(w http.ResponseWriter, r *http.Request) {
+	s.postField(w, r, "id", func(id string) {
+		if s.OnSwitchSession != nil && id != "" {
+			s.OnSwitchSession(id)
+		}
+	})
+}
+
+func (s *Server) handleSessionRename(w http.ResponseWriter, r *http.Request) {
+	if !s.authed(r) || r.Method != http.MethodPost {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	var body struct {
+		ID    string `json:"id"`
+		Title string `json:"title"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if s.OnRenameSession != nil && body.ID != "" {
+		s.OnRenameSession(body.ID, body.Title)
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleSessionDelete(w http.ResponseWriter, r *http.Request) {
+	s.postField(w, r, "id", func(id string) {
+		if s.OnDeleteSession != nil && id != "" {
+			s.OnDeleteSession(id)
+		}
+	})
+}
+
+func (s *Server) handleLang(w http.ResponseWriter, r *http.Request) {
+	s.postField(w, r, "lang", func(lang string) {
+		if s.OnSetLang != nil && lang != "" {
+			s.OnSetLang(lang)
+		}
+	})
+}
+
+func (s *Server) handleModel(w http.ResponseWriter, r *http.Request) {
+	s.postField(w, r, "role", func(role string) {
+		if s.OnSetModel != nil && role != "" {
+			s.OnSetModel(role)
+		}
+	})
+}
+
+func (s *Server) handleMode(w http.ResponseWriter, r *http.Request) {
+	s.postField(w, r, "mode", func(m string) {
+		if s.OnSetMode != nil && m != "" {
+			s.OnSetMode(m)
+		}
+	})
+}
+
+func (s *Server) handleSandbox(w http.ResponseWriter, r *http.Request) {
+	s.postField(w, r, "mode", func(m string) {
+		if s.OnSetSandbox != nil && m != "" {
+			s.OnSetSandbox(m)
+		}
+	})
+}
+
+func (s *Server) handleWorkingMode(w http.ResponseWriter, r *http.Request) {
+	s.postField(w, r, "mode", func(m string) {
+		if s.OnSetWorkingMode != nil && m != "" {
+			s.OnSetWorkingMode(m)
+		}
+	})
 }

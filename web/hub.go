@@ -33,10 +33,18 @@ type ReviewInfo struct {
 	Args string `json:"args"`
 }
 
+// SessionInfo 是会话列表里的一项(对齐 TUI 的 /sessions),供前端点击切换。
+type SessionInfo struct {
+	ID     string `json:"id"`
+	Title  string `json:"title"`
+	Active bool   `json:"active"`
+}
+
 // Snapshot 是 web dashboard 的完整状态快照,新连接的浏览器先收到它,再收实时增量。
 type Snapshot struct {
 	Messages      []Message      `json:"messages"`
-	Plan          []PlanNode     `json:"plan"`
+	Plan          []PlanNode     `json:"plan"` // 计划(Todo)
+	Step          []PlanNode     `json:"step"` // 步骤(CreatePlan DAG)
 	ToolCalls     []ToolCallView `json:"toolCalls"`
 	Usage         *Usage         `json:"usage"`
 	Streaming     bool           `json:"streaming"`
@@ -44,6 +52,15 @@ type Snapshot struct {
 	Workspace     string         `json:"workspace"`
 	Lang          string         `json:"lang"` // "zh" | "en",跟 TUI 同步
 	ReviewPending *ReviewInfo    `json:"reviewPending"`
+
+	// 控制态,与 TUI 对齐:路由 / 权限模式 / 沙箱 / 工作模式 / 代码图谱状态 + 会话列表。
+	Vendor      string        `json:"vendor"`      // 模型厂商(api host)
+	Routing     string        `json:"routing"`     // auto | flash | pro(模型路由 pin)
+	Mode        string        `json:"mode"`        // plan | auto | review
+	Sandbox     string        `json:"sandbox"`     // off | native | docker
+	WorkingMode string        `json:"workingMode"` // karpathy | openspec | superpowers
+	CodeGraph   string        `json:"codegraph"`   // 代码图谱状态 token
+	Sessions    []SessionInfo `json:"sessions"`
 }
 
 const clientBufferSize = 512
@@ -69,10 +86,17 @@ func NewHub(flashModel, proModel, workspace, lang string) *Hub {
 		snap: Snapshot{
 			Messages:  []Message{},
 			Plan:      []PlanNode{},
+			Step:      []PlanNode{},
 			ToolCalls: []ToolCallView{},
 			Models:    ModelsInfo{Flash: flashModel, Pro: proModel, ActiveRole: "flash"},
 			Workspace: workspace,
 			Lang:      lang,
+			Sessions:  []SessionInfo{},
+			// 占位默认值;TUI 启动时会广播权威控制态覆盖它们。
+			Routing:     "auto",
+			Mode:        "review",
+			Sandbox:     "native",
+			WorkingMode: "karpathy",
 		},
 		openAssistant: -1,
 	}
@@ -128,7 +152,9 @@ func (h *Hub) copySnapshotLocked() Snapshot {
 	s := h.snap
 	s.Messages = append([]Message(nil), h.snap.Messages...)
 	s.Plan = append([]PlanNode(nil), h.snap.Plan...)
+	s.Step = append([]PlanNode(nil), h.snap.Step...)
 	s.ToolCalls = append([]ToolCallView(nil), h.snap.ToolCalls...)
+	s.Sessions = append([]SessionInfo(nil), h.snap.Sessions...)
 	if h.snap.Usage != nil {
 		u := *h.snap.Usage
 		s.Usage = &u
@@ -147,6 +173,7 @@ func (h *Hub) apply(ev Event) Event {
 		// 新回合开始:落一条 user 消息,清空上一轮的 plan / 工具列表,重置 assistant 气泡。
 		h.snap.Messages = append(h.snap.Messages, Message{Role: "user", Content: ev.Text})
 		h.snap.Plan = []PlanNode{}
+		h.snap.Step = []PlanNode{}
 		h.snap.ToolCalls = []ToolCallView{}
 		h.snap.Usage = nil
 		h.snap.ReviewPending = nil
@@ -193,18 +220,25 @@ func (h *Hub) apply(ev Event) Event {
 		}
 
 	case "plan":
-		h.snap.Plan = append([]PlanNode(nil), ev.Plan...)
+		// createplan → 步骤;todo / 其它 → 计划。对齐 TUI 的 计划/步骤 两套。
+		if ev.PlanKind == "createplan" {
+			h.snap.Step = append([]PlanNode(nil), ev.Plan...)
+		} else {
+			h.snap.Plan = append([]PlanNode(nil), ev.Plan...)
+		}
 
 	case "plan_status":
-		for i := range h.snap.Plan {
-			if h.snap.Plan[i].ID == ev.ID {
-				if ev.Status != "" {
-					h.snap.Plan[i].Status = ev.Status
+		// 节点 id 可能在 计划 或 步骤 任一份里,两边都找。
+		for _, list := range [][]PlanNode{h.snap.Plan, h.snap.Step} {
+			for i := range list {
+				if list[i].ID == ev.ID {
+					if ev.Status != "" {
+						list[i].Status = ev.Status
+					}
+					if ev.Summary != "" {
+						list[i].Summary = ev.Summary
+					}
 				}
-				if ev.Summary != "" {
-					h.snap.Plan[i].Summary = ev.Summary
-				}
-				break
 			}
 		}
 
@@ -229,6 +263,50 @@ func (h *Hub) apply(ev Event) Event {
 		if ev.Text != "" {
 			h.snap.Lang = ev.Text
 		}
+
+	case "vendor":
+		if ev.Text != "" {
+			h.snap.Vendor = ev.Text
+		}
+
+	case "routing":
+		if ev.Text != "" {
+			h.snap.Routing = ev.Text
+		}
+
+	case "mode":
+		if ev.Text != "" {
+			h.snap.Mode = ev.Text
+		}
+
+	case "sandbox":
+		if ev.Text != "" {
+			h.snap.Sandbox = ev.Text
+		}
+
+	case "working_mode":
+		if ev.Text != "" {
+			h.snap.WorkingMode = ev.Text
+		}
+
+	case "codegraph":
+		if ev.Text != "" {
+			h.snap.CodeGraph = ev.Text
+		}
+
+	case "sessions":
+		h.snap.Sessions = append([]SessionInfo(nil), ev.Sessions...)
+
+	case "session_loaded":
+		// 切换 / 新建会话:重置聊天与本轮派生状态,载入新会话的消息。
+		h.snap.Messages = append([]Message(nil), ev.Messages...)
+		h.snap.Plan = []PlanNode{}
+		h.snap.Step = []PlanNode{}
+		h.snap.ToolCalls = []ToolCallView{}
+		h.snap.Usage = nil
+		h.snap.ReviewPending = nil
+		h.snap.Streaming = false
+		h.openAssistant = -1
 	}
 	return ev
 }

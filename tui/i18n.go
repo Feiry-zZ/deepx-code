@@ -141,6 +141,14 @@ var translations = map[string]map[Lang]string{
 		LangZH: "历史对话列表:↑/↓ 选择,Enter 切换",
 		LangEN: "Conversation history: ↑/↓ select, Enter switch",
 	},
+	"cmd.sessionrename.desc": {
+		LangZH: "重命名当前对话:/session-rename <新标题>",
+		LangEN: "Rename current conversation: /session-rename <title>",
+	},
+	"cmd.sessiondelete.desc": {
+		LangZH: "弹框选择要删除的对话(默认对话不可删)",
+		LangEN: "Pick a conversation to delete (default cannot be deleted)",
+	},
 	"cmd.status.desc": {
 		LangZH: "显示/隐藏右侧状态栏(也可按 Ctrl+B)",
 		LangEN: "Show/hide the right status panel (or press Ctrl+B)",
@@ -225,13 +233,37 @@ var translations = map[string]map[Lang]string{
 		LangZH: "正在生成中,先按 Esc 停止再切换/新建对话",
 		LangEN: "Still streaming — press Esc to stop before switching/new conversation",
 	},
+	"session.rename.usage": {
+		LangZH: "用法:/session-rename <新标题>",
+		LangEN: "Usage: /session-rename <title>",
+	},
+	"session.renamed": {
+		LangZH: "✎ 已重命名当前对话为:%s",
+		LangEN: "✎ Renamed current conversation to: %s",
+	},
+	"session.deleted_named": {
+		LangZH: "🗑 已删除对话:%s",
+		LangEN: "🗑 Deleted conversation: %s",
+	},
+	"session.delete.cant_default": {
+		LangZH: "默认对话不可删除。",
+		LangEN: "The default conversation cannot be deleted.",
+	},
 	"session.modal.title": {
 		LangZH: "历史对话",
 		LangEN: "Conversations",
 	},
+	"session.modal.title_delete": {
+		LangZH: "🗑 删除对话",
+		LangEN: "🗑 Delete Conversation",
+	},
 	"session.modal.footer": {
 		LangZH: "↑/↓ 选择 · Enter 切换 · Esc 取消",
 		LangEN: "↑/↓ select · Enter switch · Esc cancel",
+	},
+	"session.modal.footer_delete": {
+		LangZH: "↑/↓ 选择 · Enter 删除 · Esc 取消",
+		LangEN: "↑/↓ select · Enter delete · Esc cancel",
 	},
 	"session.modal.empty": {
 		LangZH: "(暂无历史对话)",

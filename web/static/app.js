@@ -18,15 +18,32 @@ const I18N = {
     'review.approve': '批准',
     'review.reject': '拒绝',
     workspace: '工作区',
-    'panel.status': '状态',
-    'panel.plan': '规划',
+    'panel.vendor': '模型厂商',
+    'panel.curmodel': '当前模型',
+    'panel.context': '上下文',
+    'panel.plan': '计划',
+    'panel.step': '步骤',
     'panel.tools': '工具调用',
-    'label.state': '运行',
-    'label.prompt': '输入',
+    'label.used': '占用',
     'label.output': '输出',
-    'label.cache': '缓存命中',
-    'state.streaming': '生成中',
-    'state.idle': '空闲',
+    'label.cache': '缓存',
+    'session.new': '＋ 新建',
+    'session.untitled': '未命名',
+    'session.rename': '重命名',
+    'session.delete': '删除',
+    'session.rename.prompt': '输入新的会话名称:',
+    'session.delete.confirm': '确定删除这个会话吗?此操作不可撤销。',
+    'panel.routing': '模型路由',
+    'panel.mode': '权限模式',
+    'panel.sandbox': '沙箱',
+    'panel.workingmode': '工作模式',
+    'panel.codegraph': '代码图谱',
+    'cg.idle': '—',
+    'cg.loading': '加载',
+    'cg.ready': '就绪',
+    'cg.stale': '更新',
+    'cg.disabled': '已禁用',
+    'cg.degraded': '降级',
   },
   en: {
     connected: 'connected',
@@ -40,23 +57,47 @@ const I18N = {
     'review.approve': 'Approve',
     'review.reject': 'Reject',
     workspace: 'Workspace',
-    'panel.status': 'Status',
+    'panel.vendor': 'Vendor',
+    'panel.curmodel': 'Model',
+    'panel.context': 'Context',
     'panel.plan': 'Plan',
+    'panel.step': 'Step',
     'panel.tools': 'Tool Calls',
-    'label.state': 'state',
-    'label.prompt': 'prompt',
-    'label.output': 'output',
-    'label.cache': 'cache hit',
-    'state.streaming': 'streaming',
-    'state.idle': 'idle',
+    'label.used': 'Used',
+    'label.output': 'Output',
+    'label.cache': 'Cache',
+    'session.new': '＋ New',
+    'session.untitled': 'untitled',
+    'session.rename': 'Rename',
+    'session.delete': 'Delete',
+    'session.rename.prompt': 'Enter a new conversation name:',
+    'session.delete.confirm': 'Delete this conversation? This cannot be undone.',
+    'panel.routing': 'Routing',
+    'panel.mode': 'Permission',
+    'panel.sandbox': 'Sandbox',
+    'panel.workingmode': 'Working Mode',
+    'panel.codegraph': 'CodeGraph',
+    'cg.idle': '—',
+    'cg.loading': 'loading',
+    'cg.ready': 'ready',
+    'cg.stale': 'stale',
+    'cg.disabled': 'disabled',
+    'cg.degraded': 'degraded',
   },
 };
+
+// 控制项可选值(与 TUI / 后端一致)。
+const ROUTING_OPTIONS = ['auto', 'flash', 'pro'];
+const MODE_OPTIONS = ['plan', 'auto', 'review'];
+const SANDBOX_OPTIONS = ['off', 'native', 'docker'];
+const WORKING_MODE_OPTIONS = ['karpathy', 'openspec', 'superpowers'];
 
 createApp({
   data() {
     return {
       messages: [],
       plan: [],
+      step: [],
       toolCalls: [],
       usage: null,
       streaming: false,
@@ -67,6 +108,19 @@ createApp({
       connected: false,
       openIdx: -1, // 当前流式 assistant 消息下标
       lang: 'zh',  // 跟 TUI 同步
+      // 控制态(对齐 TUI),由快照 / 增量事件同步
+      vendor: '',
+      routing: 'auto',
+      mode: 'review',
+      sandbox: 'native',
+      workingMode: 'karpathy',
+      codegraph: '',
+      sessions: [],
+      menuOpen: null, // 当前展开"…"菜单的会话 id
+      routingOptions: ROUTING_OPTIONS,
+      modeOptions: MODE_OPTIONS,
+      sandboxOptions: SANDBOX_OPTIONS,
+      workingModeOptions: WORKING_MODE_OPTIONS,
       // @ 文件提及选择器
       mention: { active: false, idx: 0, query: '', start: 0, end: 0, hidden: false },
       mentionFiles: [],       // /api/files 拉到的工作区文件列表(懒加载、缓存)
@@ -77,6 +131,10 @@ createApp({
     // 已流式但还没出 token 时显示打字动画
     thinking() {
       return this.streaming && this.openIdx < 0;
+    },
+    // 当前实际在用的模型名(按活跃角色取 flash / pro)
+    activeModel() {
+      return this.models.activeRole === 'pro' ? this.models.pro : this.models.flash;
     },
     cacheRate() {
       // 显示格式:百分比 + 原始 (hit/prompt),一眼可核对。
@@ -99,6 +157,10 @@ createApp({
     },
     render(text) {
       try { return marked.parse(text || ''); } catch (_) { return text || ''; }
+    },
+    // 代码图谱状态 token → 可读标签(对齐 TUI 的 codegraph.* 文案)
+    cgLabel(s) {
+      return s ? (this.t('cg.' + s) || s) : '';
     },
     planIcon(s) {
       return { done: '✓', running: '▶', failed: '✗', blocked: '⏸', pending: ' ' }[s] || ' ';
@@ -263,6 +325,7 @@ createApp({
     applySnapshot(s) {
       this.messages = s.messages || [];
       this.plan = s.plan || [];
+      this.step = s.step || [];
       this.toolCalls = s.toolCalls || [];
       this.usage = s.usage || null;
       this.streaming = !!s.streaming;
@@ -270,6 +333,13 @@ createApp({
       this.workspace = s.workspace || '';
       this.reviewPending = s.reviewPending || null;
       if (s.lang) this.lang = s.lang;
+      if (s.vendor) this.vendor = s.vendor;
+      if (s.routing) this.routing = s.routing;
+      if (s.mode) this.mode = s.mode;
+      if (s.sandbox) this.sandbox = s.sandbox;
+      if (s.workingMode) this.workingMode = s.workingMode;
+      this.codegraph = s.codegraph || '';
+      this.sessions = s.sessions || [];
       // 推断流式气泡:最后一条是 assistant 且还在 streaming 则继续往里追加
       const last = this.messages.length - 1;
       this.openIdx = (this.streaming && last >= 0 && this.messages[last].role === 'assistant') ? last : -1;
@@ -282,6 +352,7 @@ createApp({
         case 'user_message':
           this.messages.push({ role: 'user', content: ev.text || '' });
           this.plan = [];
+          this.step = [];
           this.toolCalls = [];
           this.usage = null;
           this.reviewPending = null;
@@ -313,10 +384,13 @@ createApp({
           if (ev.role) this.models.activeRole = ev.role;
           break;
         case 'plan':
-          this.plan = ev.plan || [];
+          // createplan → 步骤;todo / 其它 → 计划(对齐 TUI 与后端 hub)
+          if (ev.planKind === 'createplan') this.step = ev.plan || [];
+          else this.plan = ev.plan || [];
           break;
         case 'plan_status': {
-          const p = this.plan.find((x) => x.id === ev.id);
+          // 节点 id 可能在 计划 或 步骤 任一份里
+          const p = this.plan.find((x) => x.id === ev.id) || this.step.find((x) => x.id === ev.id);
           if (p) {
             if (ev.status) p.status = ev.status;
             if (ev.summary) p.summary = ev.summary;
@@ -340,9 +414,67 @@ createApp({
         case 'lang':
           if (ev.text) this.lang = ev.text;
           break;
+        case 'vendor':
+          if (ev.text) this.vendor = ev.text;
+          break;
+        case 'routing':
+          if (ev.text) this.routing = ev.text;
+          break;
+        case 'mode':
+          if (ev.text) this.mode = ev.text;
+          break;
+        case 'sandbox':
+          if (ev.text) this.sandbox = ev.text;
+          break;
+        case 'working_mode':
+          if (ev.text) this.workingMode = ev.text;
+          break;
+        case 'codegraph':
+          if (ev.text) this.codegraph = ev.text;
+          break;
+        case 'sessions':
+          this.sessions = ev.sessions || [];
+          break;
+        case 'session_loaded':
+          // 切换 / 新建会话:重置聊天与本轮派生状态。
+          this.messages = ev.messages || [];
+          this.plan = [];
+          this.step = [];
+          this.toolCalls = [];
+          this.usage = null;
+          this.reviewPending = null;
+          this.streaming = false;
+          this.openIdx = -1;
+          break;
       }
       this.scrollDown();
     },
+
+    // === 控制类:点按钮 POST 回 TUI,状态由后续 SSE 增量回灌(不本地乐观更新,保证与 TUI 一致)===
+    async post(url, body) {
+      await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: body ? JSON.stringify(body) : '{}',
+      }).catch(() => {});
+    },
+    newSession() { this.post('/api/new'); },
+    switchSession(id) { if (!this.streaming) this.post('/api/switch', { id }); },
+    toggleMenu(id) { this.menuOpen = this.menuOpen === id ? null : id; },
+    renameSession(s) {
+      this.menuOpen = null;
+      const title = window.prompt(this.t('session.rename.prompt'), s.title || '');
+      if (title != null && title.trim()) this.post('/api/session-rename', { id: s.id, title: title.trim() });
+    },
+    deleteSession(s) {
+      this.menuOpen = null;
+      if (window.confirm(this.t('session.delete.confirm'))) this.post('/api/session-delete', { id: s.id });
+    },
+    setLang(lang) { this.post('/api/lang', { lang }); },
+    setModel(role) { this.post('/api/model', { role }); },
+    setMode(m) { this.post('/api/mode', { mode: m }); },
+    setSandbox(m) { this.post('/api/sandbox', { mode: m }); },
+    setWorkingMode(m) { this.post('/api/workingmode', { mode: m }); },
 
     connect() {
       const es = new EventSource('/api/events');
@@ -358,5 +490,7 @@ createApp({
   },
   mounted() {
     this.connect();
+    // 点菜单以外的任何地方关闭"…"菜单(菜单按钮 / 菜单本身用 @click.stop 不会冒泡到这里)。
+    document.addEventListener('click', () => { this.menuOpen = null; });
   },
 }).mount('#app');

@@ -180,6 +180,123 @@ func TestHandleFiles(t *testing.T) {
 	}
 }
 
+// TestControlEndpoints 验证新增的控制类端点(new/switch/mode/sandbox/workingmode)鉴权 + 回调,
+// 以及 hub 对控制态事件 / session_loaded 的快照更新。
+func TestControlEndpoints(t *testing.T) {
+	h := NewHub("flash", "pro", "/tmp/ws", "zh")
+	srv := NewServer(h)
+	gotNew := make(chan struct{}, 1)
+	gotSwitch := make(chan string, 1)
+	gotRename := make(chan [2]string, 1)
+	gotDelete := make(chan string, 1)
+	gotModel := make(chan string, 1)
+	gotMode := make(chan string, 1)
+	gotSandbox := make(chan string, 1)
+	gotWM := make(chan string, 1)
+	gotLang := make(chan string, 1)
+	srv.OnSetLang = func(l string) { gotLang <- l }
+	srv.OnNewSession = func() { gotNew <- struct{}{} }
+	srv.OnSwitchSession = func(id string) { gotSwitch <- id }
+	srv.OnRenameSession = func(id, title string) { gotRename <- [2]string{id, title} }
+	srv.OnDeleteSession = func(id string) { gotDelete <- id }
+	srv.OnSetModel = func(r string) { gotModel <- r }
+	srv.OnSetMode = func(m string) { gotMode <- m }
+	srv.OnSetSandbox = func(m string) { gotSandbox <- m }
+	srv.OnSetWorkingMode = func(m string) { gotWM <- m }
+
+	rawURL, err := srv.Listen(0)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go func() { _ = srv.Serve() }()
+	defer srv.Close()
+	u, _ := url.Parse(rawURL)
+	base := "http://" + u.Host
+	token := u.Query().Get("t")
+
+	// 无 token → 403(以 /api/mode 为代表)
+	resp, _ := http.Post(base+"/api/mode", "application/json", strings.NewReader(`{"mode":"plan"}`))
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("no-token mode want 403, got %d", resp.StatusCode)
+	}
+
+	postJSON(t, base+"/api/new?t="+token, map[string]any{})
+	select {
+	case <-gotNew:
+	case <-time.After(time.Second):
+		t.Fatal("OnNewSession not called")
+	}
+
+	postJSON(t, base+"/api/switch?t="+token, map[string]any{"id": "conv-123"})
+	if got := <-gotSwitch; got != "conv-123" {
+		t.Fatalf("OnSwitchSession got %q", got)
+	}
+	postJSON(t, base+"/api/session-rename?t="+token, map[string]any{"id": "c1", "title": "新名字"})
+	if got := <-gotRename; got[0] != "c1" || got[1] != "新名字" {
+		t.Fatalf("OnRenameSession got %v", got)
+	}
+	postJSON(t, base+"/api/session-delete?t="+token, map[string]any{"id": "c1"})
+	if got := <-gotDelete; got != "c1" {
+		t.Fatalf("OnDeleteSession got %q", got)
+	}
+	postJSON(t, base+"/api/model?t="+token, map[string]any{"role": "pro"})
+	if got := <-gotModel; got != "pro" {
+		t.Fatalf("OnSetModel got %q", got)
+	}
+	postJSON(t, base+"/api/mode?t="+token, map[string]any{"mode": "plan"})
+	if got := <-gotMode; got != "plan" {
+		t.Fatalf("OnSetMode got %q", got)
+	}
+	postJSON(t, base+"/api/sandbox?t="+token, map[string]any{"mode": "docker"})
+	if got := <-gotSandbox; got != "docker" {
+		t.Fatalf("OnSetSandbox got %q", got)
+	}
+	postJSON(t, base+"/api/workingmode?t="+token, map[string]any{"mode": "openspec"})
+	if got := <-gotWM; got != "openspec" {
+		t.Fatalf("OnSetWorkingMode got %q", got)
+	}
+	postJSON(t, base+"/api/lang?t="+token, map[string]any{"lang": "en"})
+	if got := <-gotLang; got != "en" {
+		t.Fatalf("OnSetLang got %q", got)
+	}
+
+	// 控制态事件应进快照
+	h.Broadcast(Event{Kind: "vendor", Text: "api.deepseek.com"})
+	h.Broadcast(Event{Kind: "routing", Text: "flash"})
+	h.Broadcast(Event{Kind: "mode", Text: "plan"})
+	h.Broadcast(Event{Kind: "sandbox", Text: "off"})
+	h.Broadcast(Event{Kind: "working_mode", Text: "superpowers"})
+	h.Broadcast(Event{Kind: "sessions", Sessions: []SessionInfo{{ID: "a", Title: "T", Active: true}}})
+	s := h.SnapshotCopy()
+	if s.Vendor != "api.deepseek.com" || s.Routing != "flash" || s.Mode != "plan" || s.Sandbox != "off" || s.WorkingMode != "superpowers" {
+		t.Fatalf("control state not in snapshot: %+v", s)
+	}
+
+	// 计划 / 步骤分流:createplan → Step,todo → Plan
+	h.Broadcast(Event{Kind: "plan", PlanKind: "createplan", Plan: []PlanNode{{ID: "s1", Title: "step1"}}})
+	h.Broadcast(Event{Kind: "plan", PlanKind: "todo", Plan: []PlanNode{{ID: "t1", Title: "todo1"}}})
+	h.Broadcast(Event{Kind: "plan_status", ID: "s1", Status: "done"})
+	s = h.SnapshotCopy()
+	if len(s.Step) != 1 || s.Step[0].Status != "done" {
+		t.Fatalf("step not routed/updated: %+v", s.Step)
+	}
+	if len(s.Plan) != 1 || s.Plan[0].ID != "t1" {
+		t.Fatalf("plan(todo) not routed: %+v", s.Plan)
+	}
+	if len(s.Sessions) != 1 || !s.Sessions[0].Active {
+		t.Fatalf("sessions not in snapshot: %+v", s.Sessions)
+	}
+
+	// session_loaded 应替换消息并清空派生态
+	h.Broadcast(Event{Kind: "user_message", Text: "old"})
+	h.Broadcast(Event{Kind: "session_loaded", Messages: []Message{{Role: "user", Content: "新会话第一条"}}})
+	s = h.SnapshotCopy()
+	if len(s.Messages) != 1 || s.Messages[0].Content != "新会话第一条" || s.Streaming {
+		t.Fatalf("session_loaded did not reset messages: %+v streaming=%v", s.Messages, s.Streaming)
+	}
+}
+
 func readAllString(resp *http.Response) (string, error) {
 	var b bytes.Buffer
 	_, err := b.ReadFrom(resp.Body)

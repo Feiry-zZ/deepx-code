@@ -118,6 +118,47 @@ func (m *Manager) SwitchConversation(id string) error {
 	return nil
 }
 
+// convDirByID 按 id 定位对话目录("default"/空 → rootDir,其余 → conversations/<id>)。
+func (m *Manager) convDirByID(id string) string {
+	if id == "" || id == defaultConvID {
+		return m.rootDir
+	}
+	return filepath.Join(m.rootDir, conversationsDir, id)
+}
+
+// RenameConversation 按 id 改某条对话的标题(不切换当前对话)。目录不存在返回错误。
+// 只改 title,保留 created_at / last_seen,使按创建时间排序稳定。
+func (m *Manager) RenameConversation(id, title string) error {
+	dir := m.convDirByID(id)
+	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
+		return fmt.Errorf("conversation %q not found", id)
+	}
+	meta := readConvMeta(dir)
+	if meta.CreatedAt.IsZero() {
+		meta.CreatedAt = time.Now()
+	}
+	meta.Title = strings.TrimSpace(title)
+	m.writeConvMetaTo(dir, meta)
+	return nil
+}
+
+// DeleteConversation 按 id 删除一条对话(连目录一起删)。默认对话(rootDir)不可删。
+// 若删的是当前对话,先切回默认对话再删,避免 convDir 悬空。
+func (m *Manager) DeleteConversation(id string) error {
+	if id == "" || id == defaultConvID {
+		return fmt.Errorf("default conversation cannot be deleted")
+	}
+	dir := filepath.Join(m.rootDir, conversationsDir, id)
+	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
+		return fmt.Errorf("conversation %q not found", id)
+	}
+	if m.CurrentConversation() == id {
+		m.convDir = m.rootDir
+		m.writeCurrent(defaultConvID)
+	}
+	return os.RemoveAll(dir)
+}
+
 // SetConvTitle 设置/刷新当前对话标题(由 TUI 取首条用户消息设),并更新 last_seen。
 func (m *Manager) SetConvTitle(title string) {
 	meta := readConvMeta(m.convDir)
@@ -177,13 +218,24 @@ func (m *Manager) convInfoFor(id, dir, cur string) ConvInfo {
 			ci.LastSeenAt = fi.ModTime()
 		}
 	}
+	// CreatedAt 缺失(老默认会话没存 conv.json)→ 用历史文件 / 目录 mtime 兜底,保证按创建时间排序稳定。
+	if ci.CreatedAt.IsZero() {
+		if fi, err := os.Stat(filepath.Join(dir, historyGob)); err == nil {
+			ci.CreatedAt = fi.ModTime()
+		} else if fi, err := os.Stat(dir); err == nil {
+			ci.CreatedAt = fi.ModTime()
+		}
+	}
 	return ci
 }
 
 // writeConvMeta 原子写当前 convDir 的 conv.json。
-func (m *Manager) writeConvMeta(meta convMeta) {
+func (m *Manager) writeConvMeta(meta convMeta) { m.writeConvMetaTo(m.convDir, meta) }
+
+// writeConvMetaTo 原子写指定目录的 conv.json(供按 id 重命名等不切当前对话的操作)。
+func (m *Manager) writeConvMetaTo(dir string, meta convMeta) {
 	data, _ := json.MarshalIndent(meta, "", "  ")
-	path := filepath.Join(m.convDir, convMetaFile)
+	path := filepath.Join(dir, convMetaFile)
 	tmp := path + ".tmp"
 	if os.WriteFile(tmp, data, 0o644) == nil {
 		_ = os.Rename(tmp, path)

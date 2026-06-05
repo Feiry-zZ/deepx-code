@@ -16,10 +16,33 @@
         <span class="dot"></span>{{ connected ? t('connected') : t('reconnecting') }}
       </div>
       <div v-if="streaming" class="streaming-tag">{{ t('streaming') }}</div>
+      <select class="lang-select" :value="lang" @change="setLang($event.target.value)">
+        <option value="zh">中文</option>
+        <option value="en">English</option>
+      </select>
     </header>
 
     <main class="layout">
-      <!-- 左:聊天 -->
+      <!-- 最左:会话列表(顶部新建按钮) -->
+      <nav class="sessions-pane">
+        <button class="new-session-btn" :disabled="streaming" @click="newSession">{{ t('session.new') }}</button>
+        <div class="sessions-list">
+          <div v-if="!sessions.length" class="empty">—</div>
+          <div v-for="s in sessions" :key="s.id"
+               class="session-item" :class="{ active: s.active }"
+               :title="s.title">
+            <span class="box" @click="switchSession(s.id)">{{ s.active ? '▸' : ' ' }}</span>
+            <span class="session-title" @click="switchSession(s.id)">{{ s.title || t('session.untitled') }}</span>
+            <button class="session-menu-btn" @click.stop="toggleMenu(s.id)">…</button>
+            <div class="session-menu" v-if="menuOpen === s.id" @click.stop>
+              <button @click="renameSession(s)">{{ t('session.rename') }}</button>
+              <button class="danger" @click="deleteSession(s)">{{ t('session.delete') }}</button>
+            </div>
+          </div>
+        </div>
+      </nav>
+
+      <!-- 中:聊天 -->
       <section class="chat">
         <div class="messages" ref="msgList">
           <div v-for="(m, i) in messages" :key="i" class="msg" :class="m.role">
@@ -31,6 +54,33 @@
             <div class="role">deepx</div>
             <div class="bubble typing"><span></span><span></span><span></span></div>
           </div>
+        </div>
+
+        <div class="controls-bar">
+          <label class="ctl">
+            <span class="ctl-label">{{ t('panel.routing') }}</span>
+            <select :value="routing" @change="setModel($event.target.value)">
+              <option v-for="o in routingOptions" :key="o" :value="o">{{ o }}</option>
+            </select>
+          </label>
+          <label class="ctl">
+            <span class="ctl-label">{{ t('panel.mode') }}</span>
+            <select :value="mode" @change="setMode($event.target.value)">
+              <option v-for="o in modeOptions" :key="o" :value="o">{{ o }}</option>
+            </select>
+          </label>
+          <label class="ctl">
+            <span class="ctl-label">{{ t('panel.sandbox') }}</span>
+            <select :value="sandbox" @change="setSandbox($event.target.value)">
+              <option v-for="o in sandboxOptions" :key="o" :value="o">{{ o }}</option>
+            </select>
+          </label>
+          <label class="ctl">
+            <span class="ctl-label">{{ t('panel.workingmode') }}</span>
+            <select :value="workingMode" @change="setWorkingMode($event.target.value)">
+              <option v-for="o in workingModeOptions" :key="o" :value="o">{{ o }}</option>
+            </select>
+          </label>
         </div>
 
         <form class="composer" @submit.prevent="send">
@@ -61,28 +111,44 @@
           <div class="ws-path" :title="workspace">{{ workspace || '—' }}</div>
         </div>
 
+        <div class="sec" v-if="vendor">
+          <div class="sec-title">◆ {{ t('panel.vendor') }}</div>
+          <div class="ws-path" :title="vendor">{{ vendor }}</div>
+        </div>
+
         <div class="sec">
-          <div class="sec-title">◆ {{ t('panel.status') }}</div>
-          <div class="kv"><span>{{ t('label.state') }}</span><b :class="streaming ? 'active' : ''">{{ streaming ? t('state.streaming') : t('state.idle') }}</b></div>
-          <div class="model-row" :class="{active: models.activeRole==='flash'}">
-            <span class="arrow">{{ models.activeRole==='flash' ? '▶' : ' ' }}</span>
-            <span class="role">flash</span>
-            <span class="model-id">{{ models.flash || '—' }}</span>
-          </div>
-          <div class="model-row" :class="{active: models.activeRole==='pro'}">
-            <span class="arrow">{{ models.activeRole==='pro' ? '▶' : ' ' }}</span>
-            <span class="role">pro</span>
-            <span class="model-id">{{ models.pro || '—' }}</span>
-          </div>
-          <div class="kv"><span>{{ t('label.prompt') }}</span><b>{{ usage ? usage.promptTokens : '—' }}</b></div>
-          <div class="kv"><span>{{ t('label.output') }}</span><b>{{ usage ? usage.completionTokens : '—' }}</b></div>
+          <div class="sec-title">◆ {{ t('panel.curmodel') }}</div>
+          <div class="kv-val" :title="activeModel">{{ activeModel || '—' }}</div>
+        </div>
+
+        <div class="sec">
+          <div class="sec-title">◆ {{ t('panel.context') }}</div>
+          <div class="kv"><span>{{ t('label.used') }}</span><b>{{ usage ? usage.promptTokens : '—' }}</b></div>
           <div class="kv"><span>{{ t('label.cache') }}</span><b>{{ cacheRate }}</b></div>
+          <div class="kv"><span>{{ t('label.output') }}</span><b>{{ usage ? usage.completionTokens : '—' }}</b></div>
+        </div>
+
+        <div class="sec" v-if="codegraph">
+          <div class="sec-title">◆ {{ t('panel.codegraph') }}</div>
+          <div class="kv-val">{{ cgLabel(codegraph) }}</div>
         </div>
 
         <div class="sec">
           <div class="sec-title">◆ {{ t('panel.plan') }}</div>
           <div v-if="!plan.length" class="empty">—</div>
           <div v-for="p in plan" :key="p.id" class="plan-item" :class="p.status">
+            <span class="box">{{ planIcon(p.status) }}</span>
+            <div class="plan-body">
+              <div class="plan-title">{{ p.title }}<span class="tag" v-if="p.model">[{{ p.model }}]</span></div>
+              <div class="plan-sum" v-if="p.summary">{{ p.summary }}</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="sec">
+          <div class="sec-title">◆ {{ t('panel.step') }}</div>
+          <div v-if="!step.length" class="empty">—</div>
+          <div v-for="p in step" :key="p.id" class="plan-item" :class="p.status">
             <span class="box">{{ planIcon(p.status) }}</span>
             <div class="plan-body">
               <div class="plan-title">{{ p.title }}<span class="tag" v-if="p.model">[{{ p.model }}]</span></div>

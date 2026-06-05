@@ -50,6 +50,16 @@ func Run(models agent.ModelConfig, needsSetup bool, version string, webEnabled b
 			wd, _ := os.Getwd()
 			return listWorkspaceFiles(wd)
 		}
+		// 控制类:浏览器点按钮 → program.Send 注入,走和终端命令完全相同的 Update 逻辑。
+		srv.OnNewSession = func() { p.Send(webNewSessionMsg{}) }
+		srv.OnSwitchSession = func(id string) { p.Send(webSwitchSessionMsg{id: id}) }
+		srv.OnRenameSession = func(id, title string) { p.Send(webRenameSessionMsg{id: id, title: title}) }
+		srv.OnDeleteSession = func(id string) { p.Send(webDeleteSessionMsg{id: id}) }
+		srv.OnSetModel = func(role string) { p.Send(webSetModelMsg{role: role}) }
+		srv.OnSetMode = func(mode string) { p.Send(webSetModeMsg{mode: mode}) }
+		srv.OnSetSandbox = func(mode string) { p.Send(webSetSandboxMsg{mode: mode}) }
+		srv.OnSetWorkingMode = func(mode string) { p.Send(webSetWorkingModeMsg{mode: mode}) }
+		srv.OnSetLang = func(lang string) { p.Send(webSetLangMsg{lang: lang}) }
 		go func() { _ = srv.Serve() }()
 		defer srv.Close()
 	}

@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -242,10 +243,12 @@ type model struct {
 	skillDelNames   []string
 	skillDelIdx     int
 
-	// /sessions 历史对话列表模态。
-	showSessionList bool
-	sessionConvs    []session.ConvInfo
-	sessionListIdx  int
+	// /sessions 历史对话列表模态。sessionListDelete=true 时是 /session-delete 的删除选择态
+	// (复用同一弹窗,Enter 删除选中项而非切换)。
+	showSessionList   bool
+	sessionConvs      []session.ConvInfo
+	sessionListIdx    int
+	sessionListDelete bool
 
 	// hideStatusPanel:隐藏右侧状态栏,chat 铺满整宽(Ctrl+B / /status 切换,记忆到 meta)。
 	hideStatusPanel bool
@@ -292,6 +295,10 @@ type model struct {
 	// webURL 非空时右栏显示 ◆ WEB 地址。
 	hub    *web.Hub
 	webURL string
+
+	// lastCgStatus 是最近一次广播给 web 的代码图谱状态;codegraph 在后台异步变(loading→ready),
+	// 借 blink tick 轮询、变了才广播,让 web 状态跟上 TUI(TUI 是每帧直接读 atomic)。
+	lastCgStatus string
 }
 
 // webInputMsg 是浏览器提交的输入,经 program.Send 注入,走和终端 Enter 完全相同的提交逻辑。
@@ -299,6 +306,17 @@ type webInputMsg struct{ text string }
 
 // webReviewMsg 是浏览器的 review 确认,经 program.Send 注入,复用终端同一个 ReviewCh(先到先得)。
 type webReviewMsg struct{ approve bool }
+
+// 控制类 web 消息:浏览器点按钮经 program.Send 注入,复用终端同一套切换逻辑。
+type webNewSessionMsg struct{}                // 新建会话
+type webSwitchSessionMsg struct{ id string }  // 切换到某会话
+type webRenameSessionMsg struct{ id, title string } // 重命名会话
+type webDeleteSessionMsg struct{ id string }  // 删除会话
+type webSetModelMsg struct{ role string }     // 路由 auto/flash/pro
+type webSetModeMsg struct{ mode string }      // 权限模式 plan/auto/review
+type webSetSandboxMsg struct{ mode string }   // 沙箱 off/native/docker
+type webSetWorkingModeMsg struct{ mode string } // 工作模式
+type webSetLangMsg struct{ lang string }        // 界面语言 zh/en
 
 // reviewResultMsg 审核完成后从 goroutine 发回,恢复流监听。
 type reviewResultMsg struct{}
@@ -574,10 +592,11 @@ func initialModel(models agent.ModelConfig, needsSetup bool, version string, hub
 	// 每次启动的欢迎语。
 	m.appendChat("System", T("welcome"))
 
-	// 暂时不在 chat 区显示 web 面板地址(地址仍可在右栏看到)。
-	// if webURL != "" {
-	// 	m.appendChat("System", fmt.Sprintf(T("web.ready"), webURL))
-	// }
+	// web 控制面板启用时,在 chat 区给出可点击 / 可复制的地址 —— 浏览器里能新建会话、
+	// 切会话、切权限/沙箱/工作模式,状态与终端实时对齐。
+	if webURL != "" {
+		m.appendChat("System", fmt.Sprintf(T("web.ready"), webURL))
+	}
 
 	// 剪贴板工具检测:Linux 上没装 wl-clipboard / xclip / xsel 时 Ctrl+V 文本粘贴会静默
 	// 失败(atotto/clipboard 找不到二进制就返错,bubbles textarea 啥也不做),用户调一天
@@ -617,6 +636,105 @@ func (m model) broadcast(ev web.Event) {
 	if m.hub != nil {
 		m.hub.Broadcast(ev)
 	}
+}
+
+// applyMode 切换权限模式(plan/auto/review),落一条系统提示进历史/会话,并广播给 web。
+// 终端 /plan /auto /review 与 web 按钮共用此入口。非法 mode 直接忽略。
+func (m *model) applyMode(mode agent.AgentMode) {
+	switch mode {
+	case agent.AgentMode_Plan, agent.AgentMode_Auto, agent.AgentMode_Review:
+	default:
+		return
+	}
+	m.mode = mode
+	msg := modeNotification(mode, m.activeModelRole)
+	m.history = append(m.history, agent.ChatMessage{Role: "assistant", Content: msg})
+	m.appendChat("assistant", msg)
+	if m.session != nil {
+		_ = m.session.Append("assistant", msg)
+	}
+	m.broadcast(web.Event{Kind: "mode", Text: string(mode)})
+}
+
+// applyLang 切换界面语言并广播给 web。终端 /lang 弹窗与 web 语言下拉共用此入口。
+func (m *model) applyLang(picked Lang) {
+	SetLang(picked)
+	m.refreshViewport() // 右栏 / palette 的 desc 等都要按新语言重画
+	m.broadcast(web.Event{Kind: "lang", Text: string(picked)})
+	name := "中文"
+	if picked == LangEN {
+		name = "English"
+	}
+	m.appendChat("System", fmt.Sprintf(T("lang.switched"), name))
+}
+
+// endpointHost 从模型配置的 BaseURL 里取出 api host(去 scheme / path),用作"模型厂商"展示。
+// 与 view.go 右栏的取法一致。
+func endpointHost(models agent.ModelConfig) string {
+	host := models.Flash.BaseURL
+	if host == "" {
+		host = models.Pro.BaseURL
+	}
+	if i := strings.Index(host, "://"); i >= 0 {
+		host = host[i+3:]
+	}
+	if i := strings.IndexAny(host, "/?"); i >= 0 {
+		host = host[:i]
+	}
+	return host
+}
+
+// broadcastControlState 把全部控制态(权限模式 / 沙箱 / 工作模式 / 代码图谱 + 会话列表)
+// 推给 web,使浏览器状态栏与 TUI 对齐。启动时与每次切会话后调用。
+func (m model) broadcastControlState() {
+	if m.hub == nil {
+		return
+	}
+	m.broadcast(web.Event{Kind: "vendor", Text: endpointHost(m.models)})
+	m.broadcast(web.Event{Kind: "routing", Text: m.modelPin})
+	m.broadcast(web.Event{Kind: "mode", Text: string(m.mode)})
+	m.broadcast(web.Event{Kind: "sandbox", Text: string(tools.CurrentSandboxMode())})
+	m.broadcast(web.Event{Kind: "working_mode", Text: string(m.workingMode)})
+	m.broadcast(web.Event{Kind: "codegraph", Text: tools.CodeGraphStatus()})
+	m.broadcastSessions()
+}
+
+// broadcastSessions 把会话列表(对齐 TUI /sessions)推给 web,供前端点击切换。
+func (m model) broadcastSessions() {
+	if m.hub == nil || m.session == nil {
+		return
+	}
+	convs := m.session.ListConversations()
+	// web 会话列表按创建时间排序(新建在前),保持稳定 —— 不随聊天 last_seen 重排。
+	sort.Slice(convs, func(i, j int) bool { return convs[i].CreatedAt.After(convs[j].CreatedAt) })
+	out := make([]web.SessionInfo, 0, len(convs))
+	for _, c := range convs {
+		title := c.Title
+		if title == "" {
+			title = T("session.untitled")
+		}
+		out = append(out, web.SessionInfo{ID: c.ID, Title: title, Active: c.Active})
+	}
+	m.broadcast(web.Event{Kind: "sessions", Sessions: out})
+}
+
+// broadcastSessionLoaded 在切换 / 新建会话后,把当前会话的 user/assistant 消息推给 web,
+// 让浏览器聊天区也跟着切过去(也用于启动时把已恢复的历史镜像给晚连接的浏览器)。
+func (m model) broadcastSessionLoaded() {
+	if m.hub == nil {
+		return
+	}
+	msgs := make([]web.Message, 0, len(m.history))
+	for _, h := range m.history {
+		if h.Role != "user" && h.Role != "assistant" {
+			continue // 工具 / 系统消息不进 web 聊天区
+		}
+		if strings.TrimSpace(h.Content) == "" {
+			continue
+		}
+		msgs = append(msgs, web.Message{Role: h.Role, Content: h.Content})
+	}
+	m.broadcast(web.Event{Kind: "session_loaded", Messages: msgs})
 }
 
 // submitUserInput 是终端 Enter 和 web 输入共用的提交入口:
@@ -728,6 +846,9 @@ func (m model) Init() tea.Cmd {
 	}
 	// 视觉能力探测:每次启动对各模型重探一次(见 vision.go),结果经 visionCapMsg 回灌。
 	cmds = append(cmds, visionProbeCmds(m.models)...)
+	// 启动即把控制态与已恢复的历史推进 hub 快照,晚连接的浏览器据此与 TUI 对齐。
+	m.broadcastControlState()
+	m.broadcastSessionLoaded()
 	return tea.Batch(cmds...)
 }
 
@@ -756,6 +877,66 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.broadcast(web.Event{Kind: "review_resolved"})
 			m.refreshViewport()
 			return m, func() tea.Msg { return reviewResultMsg{} }
+		}
+		return m, nil
+
+	case webNewSessionMsg:
+		// 浏览器点"新建会话":复用终端 /new 逻辑;loadCurrentConversation 会广播新会话态。
+		m.startNewConversation()
+		return m, nil
+
+	case webSwitchSessionMsg:
+		// 浏览器点会话列表:切到该 id;流式中拒绝(同终端)。
+		if !m.streaming && m.session != nil {
+			if err := m.session.SwitchConversation(msg.id); err == nil {
+				m.loadCurrentConversation()
+			}
+		}
+		return m, nil
+
+	case webRenameSessionMsg:
+		if m.session != nil {
+			_ = m.session.RenameConversation(msg.id, msg.title)
+			m.broadcastSessions()
+		}
+		return m, nil
+
+	case webDeleteSessionMsg:
+		// 删会话:流式中拒绝。删的是当前会话则删后切回默认并重载。
+		if !m.streaming && m.session != nil {
+			wasCurrent := m.session.CurrentConversation() == msg.id
+			if err := m.session.DeleteConversation(msg.id); err == nil {
+				if wasCurrent {
+					m.loadCurrentConversation() // 内部广播 session_loaded + 控制态(含会话列表)
+				} else {
+					m.broadcastSessions()
+				}
+			}
+		}
+		return m, nil
+
+	case webSetModelMsg:
+		m.applyModelPin(msg.role) // 内部广播 routing
+		return m, nil
+
+	case webSetModeMsg:
+		m.applyMode(agent.AgentMode(msg.mode))
+		return m, nil
+
+	case webSetSandboxMsg:
+		// applySandboxMode 内部已广播 sandbox 态(off/native 即时,docker 拉完在 activate 时)。
+		return m, m.applySandboxMode(tools.SandboxMode(msg.mode))
+
+	case webSetWorkingModeMsg:
+		m.applyWorkingMode(agent.NormalizeWorkingMode(msg.mode)) // 内部广播 working_mode
+		return m, nil
+
+	case webSetLangMsg:
+		switch msg.lang {
+		case string(LangZH):
+			m.applyLang(LangZH)
+		case string(LangEN):
+			m.applyLang(LangEN)
 		}
 		return m, nil
 
@@ -1033,19 +1214,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			case "enter":
-				langs := []Lang{LangZH, LangEN}
-				picked := langs[m.langModalIdx]
-				SetLang(picked)
+				picked := []Lang{LangZH, LangEN}[m.langModalIdx]
 				m.showLangModal = false
-				// 切换后右栏 / palette 的 desc 都需要刷新一遍
-				m.refreshViewport()
-				// 同步语言给 web 端
-				m.broadcast(web.Event{Kind: "lang", Text: string(picked)})
-				name := "中文"
-				if picked == LangEN {
-					name = "English"
-				}
-				m.appendChat("System", fmt.Sprintf(T("lang.switched"), name))
+				m.applyLang(picked)
 				return m, nil
 			case "esc", "ctrl+c":
 				m.showLangModal = false
@@ -1286,10 +1457,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			case "enter":
-				m.submitSessionSwitch()
+				if m.sessionListDelete {
+					m.submitSessionDelete()
+				} else {
+					m.submitSessionSwitch()
+				}
 				return m, nil
 			case "esc", "ctrl+c":
 				m.showSessionList = false
+				m.sessionListDelete = false
 				m.input.Focus()
 				return m, nil
 			}
@@ -1710,6 +1886,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// app 侧 cursor blink:每 600ms 切一次可见,View 那边读 cursorBlinkOff
 		// 决定要不要把光标塞进 tea.View.Cursor。继续返回下一拍 tick,自驱动。
 		m.cursorBlinkOff = !m.cursorBlinkOff
+		// 顺带轮询代码图谱状态:后台异步变化(loading→ready),变了才广播给 web,保持与 TUI 对齐。
+		if m.hub != nil {
+			if cg := tools.CodeGraphStatus(); cg != m.lastCgStatus {
+				m.lastCgStatus = cg
+				m.broadcast(web.Event{Kind: "codegraph", Text: cg})
+			}
+		}
 		return m, cursorBlinkTick()
 
 	case copyHintClearMsg:
@@ -2194,31 +2377,19 @@ func (m *model) handleSlashCommand(input string) tea.Cmd {
 	if strings.HasPrefix(cmd, "/working-mode") { // 带参数(kp/openspec/sp)
 		return m.handleWorkingModeCommand(cmd)
 	}
+	if strings.HasPrefix(cmd, "/session-rename") { // 带参数:新标题(保留大小写,传原文)
+		return m.handleSessionRenameCommand(input)
+	}
+	if strings.HasPrefix(cmd, "/session-delete") { // 删当前会话
+		return m.handleSessionDeleteCommand()
+	}
 	switch cmd {
 	case "/plan":
-		m.mode = agent.AgentMode_Plan
-		msg := modeNotification(agent.AgentMode_Plan, m.activeModelRole)
-		m.history = append(m.history, agent.ChatMessage{Role: "assistant", Content: msg})
-		m.appendChat("assistant", msg)
-		if m.session != nil {
-			_ = m.session.Append("assistant", msg)
-		}
+		m.applyMode(agent.AgentMode_Plan)
 	case "/auto":
-		m.mode = agent.AgentMode_Auto
-		msg := modeNotification(agent.AgentMode_Auto, m.activeModelRole)
-		m.history = append(m.history, agent.ChatMessage{Role: "assistant", Content: msg})
-		m.appendChat("assistant", msg)
-		if m.session != nil {
-			_ = m.session.Append("assistant", msg)
-		}
+		m.applyMode(agent.AgentMode_Auto)
 	case "/review":
-		m.mode = agent.AgentMode_Review
-		msg := modeNotification(agent.AgentMode_Review, m.activeModelRole)
-		m.history = append(m.history, agent.ChatMessage{Role: "assistant", Content: msg})
-		m.appendChat("assistant", msg)
-		if m.session != nil {
-			_ = m.session.Append("assistant", msg)
-		}
+		m.applyMode(agent.AgentMode_Review)
 	case "/mode":
 		m.appendChat("assistant", fmt.Sprintf(T("mode.show"), m.mode))
 	case "/config":
@@ -2307,6 +2478,7 @@ func (m *model) activateDockerSandbox(image string) {
 		mm.SandboxDockerImage = image
 	})
 	m.appendChat("assistant", fmt.Sprintf(T("sandbox.switched_docker"), image))
+	m.broadcast(web.Event{Kind: "sandbox", Text: string(tools.SandboxDocker)})
 }
 
 // handleWorkingModeCommand 处理 /working-mode [kp|openspec|sp]:
@@ -2329,6 +2501,65 @@ func (m *model) handleWorkingModeCommand(cmd string) tea.Cmd {
 	return nil
 }
 
+// handleSessionRenameCommand 处理 /session-rename <新标题>:重命名当前会话(保留大小写)。
+func (m *model) handleSessionRenameCommand(input string) tea.Cmd {
+	rest := strings.TrimSpace(input)
+	if i := strings.IndexAny(rest, " \t"); i >= 0 {
+		rest = strings.TrimSpace(rest[i:])
+	} else {
+		rest = ""
+	}
+	if rest == "" {
+		m.appendChat("assistant", T("session.rename.usage"))
+		return nil
+	}
+	if m.session != nil {
+		_ = m.session.RenameConversation(m.session.CurrentConversation(), rest)
+		m.broadcastSessions()
+		m.appendChat("System", fmt.Sprintf(T("session.renamed"), rest))
+	}
+	return nil
+}
+
+// handleSessionDeleteCommand 处理 /session-delete:弹出会话列表,选中后删除(而非直接删当前)。
+func (m *model) handleSessionDeleteCommand() tea.Cmd {
+	if m.streaming {
+		m.appendChat("System", T("session.streaming"))
+		return nil
+	}
+	m.openSessionListModal()
+	m.sessionListDelete = true // 复用 /sessions 弹窗,Enter 改为删除选中项
+	return nil
+}
+
+// submitSessionDelete 删除弹窗里选中的会话(默认会话不可删;删的是当前会话则切回默认并重载)。
+func (m *model) submitSessionDelete() {
+	defer func() { m.showSessionList = false; m.sessionListDelete = false; m.input.Focus() }()
+	if m.streaming {
+		m.appendChat("System", T("session.streaming"))
+		return
+	}
+	if m.sessionListIdx < 0 || m.sessionListIdx >= len(m.sessionConvs) {
+		return
+	}
+	target := m.sessionConvs[m.sessionListIdx]
+	wasCurrent := target.Active
+	if err := m.session.DeleteConversation(target.ID); err != nil {
+		m.appendChat("System", T("session.delete.cant_default"))
+		return
+	}
+	if wasCurrent {
+		m.loadCurrentConversation() // DeleteConversation 已切回默认,重载并广播
+	} else {
+		m.broadcastSessions()
+	}
+	title := target.Title
+	if title == "" {
+		title = T("session.untitled")
+	}
+	m.appendChat("System", fmt.Sprintf(T("session.deleted_named"), title))
+}
+
 // workingModeOrder 是弹窗里工作模式的展示顺序,与 workingModeModalIdx 对应。
 var workingModeOrder = []agent.WorkingMode{
 	agent.WorkingModeKarpathy,
@@ -2346,13 +2577,15 @@ func workingModeIndex(mode agent.WorkingMode) int {
 	return 0
 }
 
-// applyWorkingMode 切换工作模式、写进当前 session,并给一条提示。
+// applyWorkingMode 切换工作模式、写进当前 session,给一条提示,并广播给 web。
+// 终端命令 / 弹窗 / web 按钮共用此入口,故两边状态对齐。
 func (m *model) applyWorkingMode(mode agent.WorkingMode) {
 	m.workingMode = mode
 	if m.session != nil {
 		m.session.SaveWorkingMode(string(mode))
 	}
 	m.appendChat("assistant", fmt.Sprintf(T("workingmode.switched"), mode))
+	m.broadcast(web.Event{Kind: "working_mode", Text: string(mode)})
 }
 
 // handleSandboxCommand 处理 /sandbox [off|native|docker [image]]:
@@ -2420,6 +2653,7 @@ func (m *model) applySandboxMode(mode tools.SandboxMode) tea.Cmd {
 		tools.SetSandboxMode(tools.SandboxOff)
 		metaUpdate(func(mm *meta) { mm.Sandbox = string(tools.SandboxOff) })
 		m.appendChat("assistant", T("sandbox.switched_off"))
+		m.broadcast(web.Event{Kind: "sandbox", Text: string(tools.SandboxOff)})
 	case tools.SandboxNative:
 		tools.SetSandboxMode(tools.SandboxNative)
 		metaUpdate(func(mm *meta) { mm.Sandbox = string(tools.SandboxNative) })
@@ -2428,6 +2662,7 @@ func (m *model) applySandboxMode(mode tools.SandboxMode) tea.Cmd {
 		} else {
 			m.appendChat("assistant", T("sandbox.switched_native_soft"))
 		}
+		m.broadcast(web.Event{Kind: "sandbox", Text: string(tools.SandboxNative)})
 	case tools.SandboxDocker:
 		if err := tools.DockerAvailable(); err != nil {
 			m.appendChat("System", fmt.Sprintf(T("sandbox.docker_unavailable"), err))
@@ -2503,7 +2738,10 @@ func (m *model) applyModelPin(arg string) {
 		m.modelPin = arg
 		m.setActiveModel(arg) // 状态区即时切到锁定的模型
 		m.appendModelLockPair(arg)
+	default:
+		return
 	}
+	m.broadcast(web.Event{Kind: "routing", Text: m.modelPin})
 }
 
 // setActiveModel 立即把状态区显示的活跃模型切到 role,使 /model 选择即时反映在右栏。

@@ -28,6 +28,7 @@ func (m *model) openSessionListModal() {
 		}
 	}
 	m.showSessionList = true
+	m.sessionListDelete = false
 	m.input.Blur()
 }
 
@@ -104,6 +105,10 @@ func (m *model) loadCurrentConversation() {
 	}
 	m.refreshViewport()
 	m.chatViewport.GotoBottom()
+	// 镜像给 web:载入新会话的消息 + 同步控制态(工作模式按会话恢复,故一并广播)。
+	// 终端 /new、/sessions 与 web 按钮都经此函数,故 web 镜像两边都能跟上。
+	m.broadcastSessionLoaded()
+	m.broadcastControlState()
 }
 
 // maybeSetConvTitle 在对话还没标题时,用当前这条用户输入当标题(截断)。
@@ -162,7 +167,11 @@ func (m model) sessionListModalBlock() string {
 		innerW = 20
 	}
 
-	title := lipgloss.NewStyle().Bold(true).Foreground(highlightColor).Render(T("session.modal.title"))
+	titleKey := "session.modal.title"
+	if m.sessionListDelete {
+		titleKey = "session.modal.title_delete"
+	}
+	title := lipgloss.NewStyle().Bold(true).Foreground(highlightColor).Render(T(titleKey))
 	// "当前对话"标记的固定槽位:所有行都留这么宽,非当前行填空格 → 日期右边界对齐。
 	tagStr := " ·" + T("session.current")
 	tagW := ansi.StringWidth(tagStr)
@@ -204,7 +213,11 @@ func (m model) sessionListModalBlock() string {
 			rows = append(rows, lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Render(line))
 		}
 	}
-	footer := lipgloss.NewStyle().Foreground(dimColor).Render(T("session.modal.footer"))
+	footerKey := "session.modal.footer"
+	if m.sessionListDelete {
+		footerKey = "session.modal.footer_delete"
+	}
+	footer := lipgloss.NewStyle().Foreground(dimColor).Render(T(footerKey))
 	parts := append([]string{title, ""}, rows...)
 	parts = append(parts, "", footer)
 	return wrapModal(lipgloss.JoinVertical(lipgloss.Left, parts...), modalW, m.width)
