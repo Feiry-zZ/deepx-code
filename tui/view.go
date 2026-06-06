@@ -26,6 +26,12 @@ func (m model) wrapView(content string) tea.View {
 	v := tea.NewView(content)
 	v.AltScreen = true
 	v.MouseMode = tea.MouseModeCellMotion
+	// 文本输入类弹窗(填 API key / MCP / skill / web 配置)打开时关掉鼠标捕获,
+	// 让终端恢复原生右键粘贴(WSL2 / Windows Terminal 等)。否则鼠标模式开着时,
+	// 右键被当成鼠标事件吞掉,用户只能 Ctrl+V(见 issue #40)。这些弹窗内不需要拖拽/滚动。
+	if m.showSetup || m.showMcpAdd || m.showSkillAdd || m.showWebConfig {
+		v.MouseMode = tea.MouseModeNone
+	}
 	// 开 Kitty keyboard 协议的"alternate keys"上报 — 让 Ctrl+Enter / Shift+Enter
 	// 等组合键以独立 escape 序列发到程序,而不是被终端合并成普通 Enter。
 	// 支持的终端:Kitty / Wezterm / Foot / iTerm2(实验性);macOS Terminal.app 不支持
