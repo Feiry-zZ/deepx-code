@@ -57,18 +57,21 @@ const inputGutterWidth = 2
 var inputPromptStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("99")).Bold(true)
 
 var (
-	scrollbarDividerStyle = lipgloss.NewStyle().Foreground(bannerDecoColor)                  // 常规分隔线 │
-	scrollbarThumbStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("255")).Bold(true) // 滑块 ┃(高亮)
+	scrollbarDividerStyle = lipgloss.NewStyle().Foreground(bannerDecoColor)     // 轨道:暗色粗 ┃
+	scrollbarThumbStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("255")) // 滑块:亮白粗 ┃
 )
 
-// scrollbarDividers 生成 body 每行的右分隔线字形:常规行 `│`,滑块所在行 `┃`(高亮)。
-// 滚动条就画在这条分隔线上、不另占列 —— 每行都有竖线,右边界始终连续,
-// 不会因多出一列而在 Terminal.app 把右栏挤偏。内容不溢出时全是常规 `│`(就是一条普通分隔线)。
+// scrollbarWidth 是右侧分隔线/滚动条区占的列数:1 列。
+const scrollbarWidth = 1
+
+// scrollbarDividers 生成 body 每行右侧的分隔线/滚动条字形:轨道行用暗色 `┃`,滑块行用亮白 `┃`
+// (同一字符、同列、同宽、上下连续,只靠加亮区分;与左侧引用条 ┃ 一致)。
 func (m model) scrollbarDividers(height int) []string {
-	normal := scrollbarDividerStyle.Render("│")
+	track := scrollbarDividerStyle.Render("┃")
+	thumbStr := scrollbarThumbStyle.Render("┃")
 	out := make([]string, height)
 	for i := range out {
-		out[i] = normal
+		out[i] = track
 	}
 	if height <= 0 {
 		return out
@@ -100,9 +103,8 @@ func (m model) scrollbarDividers(height int) []string {
 	if pos > height-thumb {
 		pos = height - thumb
 	}
-	thumbChar := scrollbarThumbStyle.Render("┃")
 	for i := pos; i < pos+thumb && i < height; i++ {
-		out[i] = thumbChar
+		out[i] = thumbStr
 	}
 	return out
 }
@@ -151,7 +153,7 @@ func (m model) layout() (leftW, vpH int) {
 			rightW = m.width / 2
 		}
 	}
-	leftW = m.width - rightW - 1
+	leftW = m.width - rightW - scrollbarWidth
 	if leftW < 1 {
 		leftW = 1
 	}
@@ -174,7 +176,7 @@ func (m model) View() tea.View {
 			rightW = m.width / 2
 		}
 	}
-	leftW := m.width - rightW - 1 // -1 = 竖分隔线/滚动条列
+	leftW := m.width - rightW - scrollbarWidth // 右侧留 scrollbarWidth 列给分隔线/滚动条
 	if leftW < 1 {
 		leftW = 1
 	}
@@ -223,15 +225,7 @@ func (m model) View() tea.View {
 		}
 	}
 
-	// 手动逐行拼接:chat_line + │ + right_line。
-	// 不走 lipgloss.JoinHorizontal — JoinHorizontal 按 lipgloss 测出的列宽对齐,而
-	// chat 行里的 emoji / 特殊字符(`🐚` `⛅` `°C` 等)在 ansi.StringWidth vs
-	// terminal 实际渲染之间可能差 1 cell,逐行差异导致 `│` 在某些行偏移、视觉上断开。
-	// 字符串拼接让 `│` 永远紧跟在 chat 最后一个字符之后,跟 chat 行内容流式衔接,
-	// 即使 chat 行实际宽度跟预期不一致,`│` 也连贯不断。
-	// 滚动条直接画在这条分隔线上(不另占列):每行都有竖线,右边界始终连续;
-	// 滑块所在行换成高亮粗竖线 `┃`,其余行是常规 `│`。都是宽度 1 的 box-drawing 字符,
-	// 在 macOS Terminal.app 也稳定渲染成 1 cell,不会像 `█`/`░` 那样把右栏挤偏。
+	// 手动逐行拼接:chat_line + 分隔线/滚动条(scrollbarWidth 列)+ right_line。
 	divs := m.scrollbarDividers(bodyH)
 	bodyLines := make([]string, bodyH)
 	for i := 0; i < bodyH; i++ {
@@ -401,13 +395,8 @@ func (m model) View() tea.View {
 	return v
 }
 
-// normalizeFrame 把整帧锁到精确 width × height:
-//   - 行数不够补空行(下方)
-//   - 行数过多截掉(尾部)
-//   - 每行宽度不够补空格,过宽用 ansi.Cut 切到精确 width
-//
-// 测量统一走 lineDisplayWidth(启动时按终端选 WcWidth / GraphemeWidth),跟 chat 行 pad
-// 用同一套口径,divider 才不会被推偏。
+// normalizeFrame 把整帧锁到精确 width × height:行数不足补空行/过多截尾,
+// 每行宽度不足补空格/过宽用 ansi.Cut 切到精确 width。
 func normalizeFrame(s string, width, height int) string {
 	lines := strings.Split(s, "\n")
 	if len(lines) > height {

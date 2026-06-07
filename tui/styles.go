@@ -105,14 +105,15 @@ func applyQuoteBar(content, kind string) string {
 	return strings.Join(lines, "\n")
 }
 
-// renderUserBubble 把用户回合渲染成气泡:左侧 1 列亮蓝块条 ▌ + 整段浅色底,按视口宽度铺满。
-// 不走 glamour —— 用户输入是纯文本(路径 / 代码片段居多),气泡里按字面显示反而更清晰,
-// 也省掉 markdown 转义带来的意外(见 backslashSentinel)。lipgloss 的 Width 负责按宽换行 + 背景铺满。
+// renderUserBubble 把用户回合渲染成气泡:左侧 1 列 ┃ 色条(与 LLM 一级 quote 同字符,多行连续)
+// + 整段浅色底,按视口宽度铺满。不走 glamour —— 用户输入是纯文本(路径 / 代码片段居多),
+// 气泡里按字面显示反而更清晰,也省掉 markdown 转义带来的意外(见 backslashSentinel)。
+// lipgloss 的 Width 负责按宽换行 + 背景铺满。
 func renderUserBubble(text string, viewportW int) string {
 	if viewportW <= 0 || text == "" {
 		return text
 	}
-	boxW := viewportW - 1 // 左侧块条占 1 列
+	boxW := viewportW - 1 // 左侧色条占 1 列
 	if boxW < 1 {
 		boxW = 1
 	}
@@ -121,7 +122,7 @@ func renderUserBubble(text string, viewportW int) string {
 		Foreground(userBubbleFg).
 		Width(boxW).
 		Padding(0, 1)
-	bar := lipgloss.NewStyle().Foreground(userBubbleBar).Render("▌")
+	bar := lipgloss.NewStyle().Foreground(userBubbleBar).Render("┃")
 	lines := strings.Split(box.Render(text), "\n")
 	for i, ln := range lines {
 		lines[i] = bar + ln

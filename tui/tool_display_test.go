@@ -16,7 +16,7 @@ func TestUpdatePreviewLineNumbers(t *testing.T) {
 		t.Fatalf("write sample: %v", err)
 	}
 	args := `{"path":"` + path + `","old_string":"line2\nline3","new_string":"newA\nnewB"}`
-	out := formatUpdatePreview("📝", args)
+	out := formatUpdatePreview(args)
 	if !strings.Contains(out, "2 - line2") {
 		t.Errorf("expected '2 - line2', got:\n%s", out)
 	}
@@ -34,7 +34,7 @@ func TestUpdatePreviewLineNumbers(t *testing.T) {
 // TestUpdatePreviewNoLineInfo 文件读不到 / 没匹配:退化成无行号渲染。
 func TestUpdatePreviewNoLineInfo(t *testing.T) {
 	args := `{"path":"/nonexistent/file.txt","old_string":"foo","new_string":"bar"}`
-	out := formatUpdatePreview("📝", args)
+	out := formatUpdatePreview(args)
 	if !strings.Contains(out, "- foo") {
 		t.Errorf("expected '- foo' fallback, got:\n%s", out)
 	}

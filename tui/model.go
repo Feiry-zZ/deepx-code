@@ -340,6 +340,7 @@ type compressionResultMsg struct {
 
 func initialModel(models agent.ModelConfig, needsSetup bool, version string, hub *web.Hub, srv *web.Server, webURL string) model {
 	vp := viewport.New()
+	vp.MouseWheelDelta = mouseWheelDelta()
 
 	sp := spinner.New()
 	sp.Spinner = spinner.MiniDot
@@ -866,10 +867,22 @@ func (m model) Init() tea.Cmd {
 	}
 	// 视觉能力探测:每次启动对各模型重探一次(见 vision.go),结果经 visionCapMsg 回灌。
 	cmds = append(cmds, visionProbeCmds(m.models)...)
+	if cmd := ForceGraphemeCmd(); cmd != nil {
+		cmds = append(cmds, cmd)
+	}
 	// 启动即把控制态与已恢复的历史推进 hub 快照,晚连接的浏览器据此与 TUI 对齐。
 	m.broadcastControlState()
 	m.broadcastSessionLoaded()
 	return tea.Batch(cmds...)
+}
+
+func ForceGraphemeCmd() tea.Cmd {
+	if !graphemeWidthMode {
+		return nil
+	}
+	return func() tea.Msg {
+		return tea.ModeReportMsg{Mode: ansi.ModeUnicodeCore, Value: ansi.ModeSet}
+	}
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -995,12 +1008,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		leftW, vpH := m.layout()
-		// chat 区:X 从 0 起,Y 从 0 起(无顶栏)。滚动条画在分隔线列(x == leftW),内容列 [0, leftW)。
+		// chat 区:X 从 0 起,Y 从 0 起(无顶栏)。滚动条/分隔线占 [leftW, leftW+scrollbarWidth) 三列,内容列 [0, leftW)。
 		chatLeft, chatTop := 0, 0
 		chatBottom := chatTop + vpH
 
-		// 先判滚动条/分隔线列:命中就进入拖拽态并按 Y 滚动,return —— 不落到选区逻辑,绝不影响拖拽选中。
-		if msg.X == leftW && msg.Y >= chatTop && msg.Y < chatBottom {
+		// 先判滚动条/分隔线区(三列):命中就进入拖拽态并按 Y 滚动,return —— 不落到选区逻辑,绝不影响拖拽选中。
+		if msg.X >= leftW && msg.X < leftW+scrollbarWidth && msg.Y >= chatTop && msg.Y < chatBottom {
 			m.scrollbarDragging = true
 			m.scrollChatToTrackRow(msg.Y-chatTop, vpH)
 			return m, nil
@@ -3058,13 +3071,13 @@ func (m *model) renderChatBaseContent(w int) string {
 	content := m.chatContent.Render(w, func(raw, kind string, width int) string {
 		// 用户回合走气泡(左块条 + 整段底色),不走 glamour / 色条,见 renderUserBubble。
 		if kind == kindUser {
-			return renderUserBubble(strings.TrimRight(ensureEmojiSpacing(raw), "\n"), width)
+			return renderUserBubble(strings.TrimRight(raw, "\n"), width)
 		}
 		var inner string
 		if kind == kindTools {
-			inner = colorizeDiffBlock(ensureEmojiSpacingANSI(ensureEmojiSpacing(raw)))
+			inner = colorizeDiffBlock(raw)
 		} else {
-			inner = ensureEmojiSpacingANSI(m.renderMarkdown(ensureEmojiSpacing(raw), barInnerWidth(width, kind)))
+			inner = m.renderMarkdown(raw, barInnerWidth(width, kind))
 		}
 		inner = strings.TrimRight(inner, "\n")
 		return applyQuoteBar(inner, kind)

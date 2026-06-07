@@ -552,6 +552,9 @@ func StartStream(
 		var lastTodo []PlanItem
 		gateNudges := 0
 
+		// lastFile = 本轮最近操作的文件路径,给 Update 漏 path 时兜底回填(issue #81)。
+		var lastFile string
+
 		// 100 轮上限给复杂多步任务留足空间(read → analyze → edit → test → fix 这种循环)。
 		// 触顶通常说明 LLM 在死循环或反复试错,需要返回错误让用户介入。
 		for round := 0; round < mainAgentMaxRounds; round++ {
@@ -769,10 +772,10 @@ func StartStream(
 							Success: false,
 						}
 					} else {
-						result = executeTool(tc, mode)
+						result = executeTool(tc, mode, &lastFile)
 					}
 				default:
-					result = executeTool(tc, mode)
+					result = executeTool(tc, mode, &lastFile)
 				}
 
 				ch <- ToolCallResultMsg{
@@ -1007,7 +1010,18 @@ func isReviewable(name string) bool {
 	return name == "Write" || name == "Update" || name == "Bash"
 }
 
-func executeTool(tc ToolCall, mode AgentMode) tools.ToolResult {
+// fileToolNames 是用于维护 lastFile(模型当前正在编辑的文件)的工具,给 Update 漏 path 时兜底。
+// 只取真正"在读写编辑目标文件"的:Read（打开待编辑文件)/ Write / Update。刻意排除:
+//   - Grep:path 常是目录或"查别的文件",会把 lastFile 污染成非编辑目标
+//   - OCR:path 是图片,而图片永远不会是 Update 的目标
+//   - List/Tree:path 是目录
+var fileToolNames = map[string]bool{"Read": true, "Write": true, "Update": true}
+
+// executeTool 执行单个工具调用。lastFile(可空)跟踪"最近操作的文件路径":
+// 部分模型把 Update 的 path 排在参数最后、偶尔整段漏掉(issue #81),导致第一次 Update 因
+// "path 参数为空"失败、再重试才成。此时用 lastFile 兜底回填 path —— 只对 Update 生效
+// (它带 old_string,补错文件会因匹配不到而安全失败;Write 是创建/覆盖,绝不猜路径)。
+func executeTool(tc ToolCall, mode AgentMode, lastFile *string) tools.ToolResult {
 	t := tools.Find(tc.Function.Name)
 	if t == nil {
 		return tools.ToolResult{
@@ -1026,6 +1040,16 @@ func executeTool(tc ToolCall, mode AgentMode) tools.ToolResult {
 		return tools.ToolResult{
 			Output:  fmt.Sprintf("参数解析失败: %v / raw=%s", err, tc.Function.Arguments),
 			Success: false,
+		}
+	}
+	// 最近文件兜底(issue #81):Update 的 path 为空时,用 lastFile 回填;否则记录本次的 path。
+	if lastFile != nil {
+		p, _ := args["path"].(string)
+		switch {
+		case strings.TrimSpace(p) == "" && t.Name == "Update" && *lastFile != "":
+			args["path"] = *lastFile
+		case strings.TrimSpace(p) != "" && fileToolNames[t.Name]:
+			*lastFile = strings.TrimSpace(p)
 		}
 	}
 	// 纵深防御:Executor 为 nil 的工具(SwitchModel / CreatePlan 等)预期在主/子 agent

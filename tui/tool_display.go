@@ -8,68 +8,31 @@ import (
 	"charm.land/lipgloss/v2"
 )
 
-// toolIcons 给每个工具一个 emoji 图标,统一 2 cell 显示宽。
-//
-// **规范**:
-//   - 只用 *默认 emoji presentation* 字符(U+1F300+ 段大多数都是),不用 VS16
-//   - VS16 (U+FE0F) 强制 emoji 形态在 macOS 系字体里没问题,但 Linux 终端 / tmux / SSH
-//     远程经常忽略 VS16,把 ✏ ⚙ 👁 ⬆ 🗂 等 text-presentation 默认字符渲染成 1 cell 文字
-//     字形,跟 lineDisplayWidth 强制 +1 的 2 cell 估算对不齐 → 行实宽 -1 → 滚动条左移抖动
-//   - 不加 trailing space — 拼接由 formatToolCallLine 在 icon 跟 name 之间显式加空格
-//
-// 表里没有的工具走 defaultToolIcon 兜底。
-var toolIcons = map[string]string{
-	"Read":             "📄",
-	"Write":            "📝",
-	"Update":           "📝",
-	"List":             "📂",
-	"Tree":             "🌲",
-	"Glob":             "🔎",
-	"Grep":             "🔍",
-	"Bash":             "🐚",
-	"OCR":              "👀",
-	"Search":           "🌐",
-	"Fetch":            "📡",
-	"Memory":           "🧠",
-	"LoadSkill":        "📜",
-	"CreatePlan":       "📋",
-	"Todo":             "📌",
-	"UpdatePlanStatus": "✅",
-	"SwitchModel":      "🚀",
-}
-
-const defaultToolIcon = "🔧"
-
 // formatToolCallLine 把一次工具调用渲染成紧凑展示。
-// 常规工具:单行 "<icon> <ToolName> (<主要参数>)"。
+// 常规工具:单行 "<ToolName> (<主要参数>)"。
 // Update 工具:首行带路径,后接 ~~~diff 代码块,old_string 标 `-`、new_string 标 `+`,
 // 形成类似 git diff 的 patch 预览。
 // 单行参数截断阈值 80 字符,避免长 prompt/正则把整行撑爆。
+// 不带图标:emoji 在不同终端宽度不一致会把右栏分割线推偏,纯文字最稳。
 func formatToolCallLine(name, argsJSON string) string {
-	icon, ok := toolIcons[name]
-	if !ok {
-		icon = defaultToolIcon
-	}
 	if name == "Update" {
-		return formatUpdatePreview(icon, argsJSON)
+		return formatUpdatePreview(argsJSON)
 	}
 	arg := extractMainArg(name, argsJSON)
-	// icon 是 emoji(2 cell),显式加 1 空格分隔 ToolName,避免 emoji 紧贴字母在
-	// 某些终端字距异常。后跟 "(arg)" 时同样空格分隔。
 	if arg == "" {
-		return icon + " " + name
+		return name
 	}
 	if len(arg) > 80 {
 		arg = arg[:77] + "..."
 	}
-	return icon + " " + name + " (" + arg + ")"
+	return name + " (" + arg + ")"
 }
 
 // formatUpdatePreview 把 Update 工具的 path / old_string / new_string 渲染成 patch 预览。
 //
 // 输出形如:
 //
-//	📝 Update (path/to/file)
+//	Update (path/to/file)
 //
 //	~~~diff
 //	- old line 1
@@ -81,9 +44,9 @@ func formatToolCallLine(name, argsJSON string) string {
 // 用 ~~~ 而不是 ``` 包裹,避免 old/new 内容里含 ``` 撑爆 fence。
 // 长 / 多行的 old/new 各自截断到 updatePreviewMaxLines 行,行宽超过 updatePreviewMaxWidth
 // 时尾部截断 + "...";剩余行数追加 "... (N more lines)" 提示。
-// args 解析失败时退化为 "📝 Update" 单行,不抛错。
-func formatUpdatePreview(icon, argsJSON string) string {
-	header := icon + " Update"
+// args 解析失败时退化为 "Update" 单行,不抛错。
+func formatUpdatePreview(argsJSON string) string {
+	header := "Update"
 	if argsJSON == "" || argsJSON == "null" {
 		return header
 	}

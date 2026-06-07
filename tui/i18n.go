@@ -166,8 +166,8 @@ var translations = map[string]map[Lang]string{
 		LangEN: "Working mode: kp (pragmatic) / openspec (spec-driven) / sp (rigorous)",
 	},
 	"workingmode.switched": {
-		LangZH: "🧭 已切到工作模式:%s。此后每轮对话都会引导用对应 skill、并排除另外两个。",
-		LangEN: "🧭 Switched to working mode: %s. Each turn now steers toward its skill and excludes the other two.",
+		LangZH: "已切到工作模式:%s。此后每轮对话都会引导用对应 skill、并排除另外两个。",
+		LangEN: "Switched to working mode: %s. Each turn now steers toward its skill and excludes the other two.",
 	},
 	"workingmode.unknown": {
 		LangZH: "未知工作模式:%s(可选 kp/karpathy、openspec/spec、sp/superpowers)",
@@ -190,16 +190,16 @@ var translations = map[string]map[Lang]string{
 		LangEN: "docker — container isolation",
 	},
 	"sandbox.switched_off": {
-		LangZH: "⚠️ 已关闭沙箱(off):命令不做任何隔离,Write/Edit 也不再限制 workspace。仅在你完全信任时用。",
-		LangEN: "⚠️ Sandbox turned off: commands run with no isolation and Write/Edit are no longer confined to the workspace. Use only when you fully trust the workload.",
+		LangZH: "已关闭沙箱(off):命令不做任何隔离,Write/Edit 也不再限制 workspace。仅在你完全信任时用。",
+		LangEN: "Sandbox turned off: commands run with no isolation and Write/Edit are no longer confined to the workspace. Use only when you fully trust the workload.",
 	},
 	"sandbox.switched_native_os": {
-		LangZH: "🛡️ 已切到 native 沙箱(OS 隔离:文件只能写 workspace 内,host 其余只读;读和网络不限)",
-		LangEN: "🛡️ Switched to native sandbox (OS isolation: writes confined to workspace, rest of host read-only; reads and network unrestricted)",
+		LangZH: "已切到 native 沙箱(OS 隔离:文件只能写 workspace 内,host 其余只读;读和网络不限)",
+		LangEN: "Switched to native sandbox (OS isolation: writes confined to workspace, rest of host read-only; reads and network unrestricted)",
 	},
 	"sandbox.switched_native_soft": {
-		LangZH: "🛡️ 已切到 native 沙箱(软策略:本平台无 OS 隔离,仅黑名单拦明显危险命令;防误操作,非硬隔离)",
-		LangEN: "🛡️ Switched to native sandbox (soft policy: no OS isolation on this platform, only a blacklist for obviously dangerous commands; guards accidents, not a hard boundary)",
+		LangZH: "已切到 native 沙箱(软策略:本平台无 OS 隔离,仅黑名单拦明显危险命令;防误操作,非硬隔离)",
+		LangEN: "Switched to native sandbox (soft policy: no OS isolation on this platform, only a blacklist for obviously dangerous commands; guards accidents, not a hard boundary)",
 	},
 	"sandbox.docker_unavailable": {
 		LangZH: "Docker 不可用:%s。仍保持 native。",
@@ -210,24 +210,24 @@ var translations = map[string]map[Lang]string{
 		LangEN: "pulling image",
 	},
 	"sandbox.pull_failed": {
-		LangZH: "🐳 镜像拉取失败:%s。保持 native。",
-		LangEN: "🐳 Image pull failed: %s. Staying on native.",
+		LangZH: "镜像拉取失败:%s。保持 native。",
+		LangEN: "Image pull failed: %s. Staying on native.",
 	},
 	"sandbox.pull_canceled": {
-		LangZH: "🐳 已取消拉取镜像,保持 native。",
-		LangEN: "🐳 Image pull canceled. Staying on native.",
+		LangZH: "已取消拉取镜像,保持 native。",
+		LangEN: "Image pull canceled. Staying on native.",
 	},
 	"sandbox.switched_docker": {
-		LangZH: "🐳 已切到 docker 沙箱(镜像 %s):命令在容器里跑,workspace 挂载到 /workspace。首次命令会拉镜像+起容器,可能稍慢。",
-		LangEN: "🐳 Switched to docker sandbox (image %s): commands run in a container with the workspace mounted at /workspace. The first command pulls the image and starts the container — may be slow.",
+		LangZH: "已切到 docker 沙箱(镜像 %s):命令在容器里跑,workspace 挂载到 /workspace。首次命令会拉镜像+起容器,可能稍慢。",
+		LangEN: "Switched to docker sandbox (image %s): commands run in a container with the workspace mounted at /workspace. The first command pulls the image and starts the container — may be slow.",
 	},
 	"sandbox.unknown": {
 		LangZH: "未知沙箱模式:%s(可选 off / native / docker)",
 		LangEN: "Unknown sandbox mode: %s (choose off / native / docker)",
 	},
 	"session.new": {
-		LangZH: "✨ 已开启全新对话。上一段对话已保存,/sessions 可找回。",
-		LangEN: "✨ Started a new conversation. The previous one is saved — see /sessions.",
+		LangZH: "已开启全新对话。上一段对话已保存,/sessions 可找回。",
+		LangEN: "Started a new conversation. The previous one is saved — see /sessions.",
 	},
 	"session.switched": {
 		LangZH: "↩ 已切换到对话:%s",
@@ -246,8 +246,8 @@ var translations = map[string]map[Lang]string{
 		LangEN: "✎ Renamed current conversation to: %s",
 	},
 	"session.deleted_named": {
-		LangZH: "🗑 已删除对话:%s",
-		LangEN: "🗑 Deleted conversation: %s",
+		LangZH: "已删除对话:%s",
+		LangEN: "Deleted conversation: %s",
 	},
 	"session.delete.cant_default": {
 		LangZH: "默认对话不可删除。",
@@ -258,8 +258,8 @@ var translations = map[string]map[Lang]string{
 		LangEN: "Conversations",
 	},
 	"session.modal.title_delete": {
-		LangZH: "🗑 删除对话",
-		LangEN: "🗑 Delete Conversation",
+		LangZH: "删除对话",
+		LangEN: "Delete Conversation",
 	},
 	"session.modal.footer": {
 		LangZH: "↑/↓ 选择 · Enter 切换 · Esc 取消",
@@ -421,8 +421,8 @@ var translations = map[string]map[Lang]string{
 	"panel.context":   {LangZH: "上下文", LangEN: "Context"},
 	"panel.help":      {LangZH: "帮助", LangEN: "Help"},
 	"panel.codegraph": {LangZH: "代码图谱", LangEN: "CodeGraph"},
-	"panel.sandbox":   {LangZH: "🛡️ 沙箱", LangEN: "🛡️ Sandbox"},
-	"panel.workmode":  {LangZH: "🧭 工作模式", LangEN: "🧭 Working mode"},
+	"panel.sandbox":   {LangZH: "沙箱", LangEN: "Sandbox"},
+	"panel.workmode":  {LangZH: "工作模式", LangEN: "Working mode"},
 	"panel.todo":      {LangZH: "待办", LangEN: "Todo"}, // Todo 工具:主 agent 顺序清单
 	"panel.plan":      {LangZH: "计划", LangEN: "Plan"}, // CreatePlan:并发子 agent DAG
 
@@ -461,8 +461,8 @@ var translations = map[string]map[Lang]string{
 
 	// === Setup modal ===
 	"setup.title": {
-		LangZH: "🐋 deepx — 配置 API Key",
-		LangEN: "🐋 deepx — Configure API Key",
+		LangZH: "deepx — 配置 API Key",
+		LangEN: "deepx — Configure API Key",
 	},
 	"setup.hint.first_run": {
 		LangZH: "看起来这是首次启动。请粘贴你的 API key。\n" +
@@ -513,8 +513,8 @@ var translations = map[string]map[Lang]string{
 
 	// === Review modal ===
 	"review.title": {
-		LangZH: "⏳  Review Required",
-		LangEN: "⏳  Review Required",
+		LangZH: "Review Required",
+		LangEN: "Review Required",
 	},
 	"review.desc_prefix": {
 		LangZH: "Review ",
@@ -529,8 +529,8 @@ var translations = map[string]map[Lang]string{
 
 	// === Lang modal ===
 	"lang.title": {
-		LangZH: "🌐 选择语言 / Choose Language",
-		LangEN: "🌐 Choose Language / 选择语言",
+		LangZH: "选择语言 / Choose Language",
+		LangEN: "Choose Language / 选择语言",
 	},
 	"lang.option.zh": {LangZH: "中文 (Chinese)", LangEN: "中文 (Chinese)"},
 	"lang.option.en": {LangZH: "English (英文)", LangEN: "English (英文)"},
@@ -539,8 +539,8 @@ var translations = map[string]map[Lang]string{
 		LangEN: "↑/↓ select · Enter confirm · Esc cancel",
 	},
 	"workingmode.title": {
-		LangZH: "🧭 选择工作模式",
-		LangEN: "🧭 Choose Working Mode",
+		LangZH: "选择工作模式",
+		LangEN: "Choose Working Mode",
 	},
 	"workingmode.opt.karpathy": {
 		LangZH: "karpathy    — 务实快速",
@@ -591,8 +591,8 @@ var translations = map[string]map[Lang]string{
 
 	// === 版本升级提醒 ===
 	"upgrade.available": {
-		LangZH: "🎉 **新版本可用**: `v%s` → `v%s`\n```\n%s\n```",
-		LangEN: "🎉 **New version available**: `v%s` → `v%s`\n```\n%s\n```",
+		LangZH: "**新版本可用**: `v%s` → `v%s`\n```\n%s\n```",
+		LangEN: "**New version available**: `v%s` → `v%s`\n```\n%s\n```",
 	},
 
 	// === 复制提示 ===
@@ -603,12 +603,12 @@ var translations = map[string]map[Lang]string{
 
 	// === Web dashboard ===
 	"web.ready": {
-		LangZH: "🌐 **本地 Web 面板已就绪** <%s>",
-		LangEN: "🌐 **Local web dashboard ready** <%s>",
+		LangZH: "**本地 Web 面板已就绪** <%s>",
+		LangEN: "**Local web dashboard ready** <%s>",
 	},
 	"web.ready.lan": {
-		LangZH: "⚠️ 该地址绑定到了局域网:同网络的设备都能访问并**控制本会话(可执行命令)**。链接含访问令牌且为明文 HTTP,请仅在可信网络使用;改回仅本机用 `/web-config` 把 IP 设为 `127.0.0.1`(或留空)。",
-		LangEN: "⚠️ This address is bound to your LAN: any device on the network can access and **control this session (run commands)**. The link carries an access token over plain HTTP — use only on trusted networks. To revert to local-only, run `/web-config` and set the IP to `127.0.0.1` (or leave it empty).",
+		LangZH: "该地址绑定到了局域网:同网络的设备都能访问并**控制本会话(可执行命令)**。链接含访问令牌且为明文 HTTP,请仅在可信网络使用;改回仅本机用 `/web-config` 把 IP 设为 `127.0.0.1`(或留空)。",
+		LangEN: "This address is bound to your LAN: any device on the network can access and **control this session (run commands)**. The link carries an access token over plain HTTP — use only on trusted networks. To revert to local-only, run `/web-config` and set the IP to `127.0.0.1` (or leave it empty).",
 	},
 	"web.config.title": {
 		LangZH: "配置 Web 面板",
@@ -627,8 +627,8 @@ var translations = map[string]map[Lang]string{
 		LangEN: "✓ Web dashboard config saved: IP %s, port %s.",
 	},
 	"web.config.relisten_failed": {
-		LangZH: "⚠️ 配置已保存,但按新地址重启服务失败:%s。下次启动 deepx 会按新配置生效。",
-		LangEN: "⚠️ Config saved, but restarting the server on the new address failed: %s. It will take effect next time you start deepx.",
+		LangZH: "配置已保存,但按新地址重启服务失败:%s。下次启动 deepx 会按新配置生效。",
+		LangEN: "Config saved, but restarting the server on the new address failed: %s. It will take effect next time you start deepx.",
 	},
 	"web.config.port.random": {
 		LangZH: "随机",
@@ -643,7 +643,7 @@ var translations = map[string]map[Lang]string{
 		LangEN: "Invalid port: enter an integer 0–65535 (empty = random)",
 	},
 	"welcome": {
-		LangZH: "👋 欢迎试用 **deepx-code**,输入 `/help` 查看命令与快捷键。",
-		LangEN: "👋 Welcome to **deepx-code** — type `/help` for commands and shortcuts.",
+		LangZH: "欢迎试用 **deepx-code**,输入 `/help` 查看命令与快捷键。",
+		LangEN: "Welcome to **deepx-code** — type `/help` for commands and shortcuts.",
 	},
 }

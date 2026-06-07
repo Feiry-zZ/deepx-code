@@ -28,9 +28,9 @@ func TestQuoteBarVisual(t *testing.T) {
 	rendered := cl.Render(viewportW, func(raw, kind string, width int) string {
 		var inner string
 		if kind == kindTools {
-			inner = ensureEmojiSpacingANSI(ensureEmojiSpacing(raw))
+			inner = raw
 		} else {
-			inner = ensureEmojiSpacingANSI(m.renderMarkdown(ensureEmojiSpacing(raw), barInnerWidth(width, kind)))
+			inner = m.renderMarkdown(raw, barInnerWidth(width, kind))
 		}
 		inner = strings.TrimRight(inner, "\n")
 		return applyQuoteBar(inner, kind)
