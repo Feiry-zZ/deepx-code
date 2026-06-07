@@ -1,0 +1,49 @@
+name: mirror-to-gitee
+
+# 把 GitHub 上的源码 + tag 实时镜像到 Gitee,让国内用户能从 Gitee 拉到最新
+# install.sh / 源码,配合 release.yml(把发行版二进制传 Gitee)凑齐"国内加速"整条链。
+#
+# 触发:
+#   - push 到 main      → 强推 main 到 Gitee(以 GitHub 为准)
+#   - push tag vX.Y.Z   → 推该 tag 到 Gitee(release.yml 随后把二进制传到对应发行版)
+#
+# 前提:
+#   1. Gitee 上已建好同名空仓库 itmisx/deepx-code(首次本 workflow 会把它填满)。
+#   2. GitHub Secret GITHUB2GITEE_DEEPX_TOKEN = Gitee 个人私人令牌(与 release.yml 共用)。
+#      HTTPS 推送用 "<Gitee用户名>:<令牌>" 鉴权;令牌值由 Actions 自动打码,不会泄漏到日志。
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@v4
+        with:
+          # 镜像需要完整历史 + 所有 tag,浅 clone 会推不全
+          fetch-depth: 0
+
+      - name: Push to Gitee
+        env:
+          GITEE_TOKEN: ${{ secrets.GITHUB2GITEE_DEEPX_TOKEN }}
+          GITEE_USER: itmisx # Gitee 账号用户名(HTTPS 鉴权用),与 owner 不同的话改这里
+          GITEE_OWNER: itmisx
+          GITEE_REPO: deepx-code
+        run: |
+          set -e
+          if [ -z "$GITEE_TOKEN" ]; then
+            echo "未配置 GITHUB2GITEE_DEEPX_TOKEN,跳过镜像"; exit 0
+          fi
+          REMOTE="https://${GITEE_USER}:${GITEE_TOKEN}@gitee.com/${GITEE_OWNER}/${GITEE_REPO}.git"
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            echo "==> 推 tag ${GITHUB_REF_NAME} 到 Gitee"
+            git push "$REMOTE" "refs/tags/${GITHUB_REF_NAME}"
+          else
+            echo "==> 强推分支 ${GITHUB_REF_NAME} 到 Gitee(以 GitHub 为准)"
+            git push --force "$REMOTE" "HEAD:refs/heads/${GITHUB_REF_NAME}"
+          fi
+          echo "==> Gitee 镜像完成"

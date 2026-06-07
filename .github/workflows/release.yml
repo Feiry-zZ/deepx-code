@@ -44,3 +44,41 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # 把 goreleaser 在 dist/ 里产出的同一批二进制,镜像发布到 Gitee 发行版,
+      # 让国内用户能用 SOURCE=gitee 的 install.sh 加速安装/升级。
+      # 只构建一次(上面 goreleaser),这里纯分发。token 见 GitHub Secret: GITHUB2GITEE_DEEPX_TOKEN。
+      # 失败不阻断 GitHub 发布(continue-on-error)。Gitee 附件 API 若有变,改下面的 curl 即可。
+      - name: Mirror release to Gitee
+        continue-on-error: true
+        env:
+          GITEE_TOKEN: ${{ secrets.GITHUB2GITEE_DEEPX_TOKEN }}
+          GITEE_OWNER: itmisx
+          GITEE_REPO: deepx-code
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -e
+          if [ -z "$GITEE_TOKEN" ]; then
+            echo "未配置 GITHUB2GITEE_DEEPX_TOKEN,跳过 Gitee 发布"; exit 0
+          fi
+          API="https://gitee.com/api/v5/repos/${GITEE_OWNER}/${GITEE_REPO}"
+
+          echo "==> 在 Gitee 创建发行版 ${TAG}"
+          RESP=$(curl -sS -X POST "${API}/releases" \
+            -H "Content-Type: application/json" \
+            -d "{\"access_token\":\"${GITEE_TOKEN}\",\"tag_name\":\"${TAG}\",\"name\":\"${TAG}\",\"body\":\"deepx ${TAG} — 由 CI 自动同步自 GitHub\",\"target_commitish\":\"main\"}")
+          RELEASE_ID=$(echo "$RESP" | jq -r '.id // empty')
+          if [ -z "$RELEASE_ID" ]; then
+            echo "创建发行版失败,响应:$RESP"; exit 1
+          fi
+          echo "Gitee release id = ${RELEASE_ID}"
+
+          echo "==> 上传二进制 + checksums 到 Gitee"
+          for f in dist/*.tar.gz dist/*.zip dist/checksums.txt; do
+            [ -f "$f" ] || continue
+            echo "  上传 $(basename "$f")"
+            curl -sS -X POST "${API}/releases/${RELEASE_ID}/attach_files" \
+              -F "access_token=${GITEE_TOKEN}" \
+              -F "file=@${f}" >/dev/null
+          done
+          echo "==> Gitee 同步完成"

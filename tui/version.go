@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -55,8 +56,35 @@ func checkForUpgradeCmd(currentVersion string) tea.Cmd {
 	}
 }
 
-// fetchLatestRelease 打 GitHub Releases API 拿最新 tag。3s 超时避免拖累启动。
+// upgradeSource 返回安装来源:"gitee" 或 "github"(默认)。决定升级检查打哪个 API、
+// `deepx upgrade` 重跑哪个源的安装脚本。来源由安装脚本(install.sh / install.ps1)在安装
+// 时写入 ~/.deepx/.upgrade_source(纯文本一行)—— 用独立标记文件而非塞进 meta.json,是为了
+// 避免在 shell 里合并 JSON(没 jq 也能 echo 一行)。读不到或非法值一律按 github。
+func upgradeSource() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "github"
+	}
+	data, err := os.ReadFile(filepath.Join(home, ".deepx", ".upgrade_source"))
+	if err != nil {
+		return "github"
+	}
+	if strings.TrimSpace(string(data)) == "gitee" {
+		return "gitee"
+	}
+	return "github"
+}
+
+// fetchLatestRelease 拿最新 tag,按安装来源走 GitHub 或 Gitee 的 Releases API。
 func fetchLatestRelease() (string, string, error) {
+	if upgradeSource() == "gitee" {
+		return fetchLatestReleaseGitee()
+	}
+	return fetchLatestReleaseGitHub()
+}
+
+// fetchLatestReleaseGitHub 打 GitHub Releases API 拿最新 tag。3s 超时避免拖累启动。
+func fetchLatestReleaseGitHub() (string, string, error) {
 	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", githubRepoOwner, githubRepoName)
 	client := &http.Client{Timeout: 3 * time.Second}
 	req, err := http.NewRequest("GET", url, nil)
@@ -87,10 +115,50 @@ func fetchLatestRelease() (string, string, error) {
 	return strings.TrimPrefix(rel.TagName, "v"), rel.HTMLURL, nil
 }
 
-// upgradeCommand 返回当前平台的一键升级指令。升级方式就是重跑安装脚本 —— 它从 GitHub
-// Releases 拉最新预编译二进制覆盖安装。URL 由 repo 常量拼出,fork 改 githubRepoOwner /
-// githubRepoName 即可同步。Windows 走 PowerShell(install.ps1),其余(macOS/Linux)走 bash。
+// fetchLatestReleaseGitee 打 Gitee v5 OpenAPI 拿最新 tag。Gitee 响应不带 html_url,
+// release 页 URL 自行按 tag 拼(与 install.sh 的 RELEASE_PAGE/tag/ 格式一致)。
+func fetchLatestReleaseGitee() (string, string, error) {
+	url := fmt.Sprintf("https://gitee.com/api/v5/repos/%s/%s/releases/latest", githubRepoOwner, githubRepoName)
+	client := &http.Client{Timeout: 3 * time.Second}
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return "", "", err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "deepx-upgrade-check")
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return "", "", fmt.Errorf("gitee api status %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	if err != nil {
+		return "", "", err
+	}
+	var rel struct {
+		TagName string `json:"tag_name"`
+	}
+	if err := json.Unmarshal(body, &rel); err != nil {
+		return "", "", err
+	}
+	pageURL := fmt.Sprintf("https://gitee.com/%s/%s/releases/tag/%s", githubRepoOwner, githubRepoName, rel.TagName)
+	return strings.TrimPrefix(rel.TagName, "v"), pageURL, nil
+}
+
+// upgradeCommand 返回当前平台的一键升级指令。升级方式就是重跑安装脚本 —— 它拉最新预编译
+// 二进制覆盖安装。按安装来源选脚本源:gitee 装的回 Gitee(raw + SOURCE=gitee,让脚本仍从
+// Gitee 下载二进制),否则回 GitHub。Windows 走 PowerShell(install.ps1),其余走 bash。
 func upgradeCommand() string {
+	if upgradeSource() == "gitee" {
+		base := fmt.Sprintf("https://gitee.com/%s/%s/raw/main/scripts", githubRepoOwner, githubRepoName)
+		if runtime.GOOS == "windows" {
+			return fmt.Sprintf("$env:SOURCE='gitee'; irm %s/install.ps1 | iex", base)
+		}
+		return fmt.Sprintf("curl -fsSL %s/install.sh | SOURCE=gitee bash", base)
+	}
 	base := fmt.Sprintf("https://raw.githubusercontent.com/%s/%s/main/scripts", githubRepoOwner, githubRepoName)
 	if runtime.GOOS == "windows" {
 		return fmt.Sprintf("irm %s/install.ps1 | iex", base)

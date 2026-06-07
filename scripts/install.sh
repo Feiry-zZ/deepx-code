@@ -13,11 +13,35 @@
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
-# 配置:仓库地址固定写死,改动只需要更新这里。
+# 配置:仓库 + 下载来源。
+#   SOURCE=github(默认)/ gitee —— 国内用户用 gitee 加速:
+#     curl -fsSL <install.sh> | SOURCE=gitee bash
+#   OWNER/REPO 可用 DEEPX_OWNER/DEEPX_REPO 覆盖(两边仓库名不同的话)。
 # ---------------------------------------------------------------------------
-OWNER="itmisx"
-REPO="deepx-code"
+OWNER="${DEEPX_OWNER:-itmisx}"
+REPO="${DEEPX_REPO:-deepx-code}"
 BIN_NAME="deepx"
+
+SOURCE="${SOURCE:-${DEEPX_SOURCE:-github}}"
+case "$SOURCE" in
+    github)
+        GIT_HOST="github.com"
+        RELEASE_API="https://api.github.com/repos/${OWNER}/${REPO}/releases/latest"
+        DL_BASE="https://github.com/${OWNER}/${REPO}/releases/download"
+        RELEASE_PAGE="https://github.com/${OWNER}/${REPO}/releases"
+        ;;
+    gitee)
+        # Gitee 兼容 GitHub 的 release 下载 URL 格式;版本查询走 Gitee v5 OpenAPI。
+        GIT_HOST="gitee.com"
+        RELEASE_API="https://gitee.com/api/v5/repos/${OWNER}/${REPO}/releases/latest"
+        DL_BASE="https://gitee.com/${OWNER}/${REPO}/releases/download"
+        RELEASE_PAGE="https://gitee.com/${OWNER}/${REPO}/releases"
+        ;;
+    *)
+        echo "Unknown SOURCE: $SOURCE (用 github 或 gitee)" >&2
+        exit 1
+        ;;
+esac
 
 # ---------------------------------------------------------------------------
 # 颜色 & 日志
@@ -83,7 +107,7 @@ BIN_DIR="$PREFIX/bin"
 echo ""
 echo -e "${BOLD}${CYAN}  ┌─────────────────┐${RESET}"
 echo -e "${BOLD}${CYAN}  │     deepx       │${RESET}   终端里的 AI 代码助手"
-echo -e "${BOLD}${CYAN}  └─────────────────┘${RESET}   github.com/${OWNER}/${REPO}"
+echo -e "${BOLD}${CYAN}  └─────────────────┘${RESET}   ${GIT_HOST}/${OWNER}/${REPO}"
 echo ""
 
 # ---------------------------------------------------------------------------
@@ -147,7 +171,7 @@ if [ "$FROM_SOURCE" = true ]; then
     TMPDIR=$(mktemp -d)
     trap 'rm -rf "$TMPDIR"' EXIT
     info "Cloning ${OWNER}/${REPO} into $TMPDIR..."
-    git clone --depth=1 "https://github.com/${OWNER}/${REPO}.git" "$TMPDIR/${REPO}"
+    git clone --depth=1 "https://${GIT_HOST}/${OWNER}/${REPO}.git" "$TMPDIR/${REPO}"
     info "Running go build..."
     BUILTIN_VER=$(date +%Y%m%d%H%M%S)  # 注入内嵌 skill 版本号,触发安装后自动刷新
     (cd "$TMPDIR/${REPO}" && go build -trimpath -ldflags="-s -w -X deepx/skill.builtinVersion=${BUILTIN_VER}" -o "$BIN_NAME" .)
@@ -160,17 +184,16 @@ else
     # ---------------------------------------------------------------------------
     step "Resolving version"
     if [ -z "$VERSION" ]; then
-        info "Querying latest release from GitHub..."
-        LATEST_URL="https://api.github.com/repos/${OWNER}/${REPO}/releases/latest"
+        info "Querying latest release from ${SOURCE}..."
         # 先写到临时文件再解析,避免 curl | grep 管道断写导致 (23) 错误
         VERSION_FILE=$(mktemp)
         if ! curl -fsSL --connect-timeout 10 --max-time 15 \
-            -H "Accept: application/vnd.github+json" "$LATEST_URL" -o "$VERSION_FILE"; then
+            -H "Accept: application/json" "$RELEASE_API" -o "$VERSION_FILE"; then
             rm -f "$VERSION_FILE"
-            error "无法查询最新版本。可能是网络问题或 GitHub API 限频(未认证:60次/小时/IP)。"
+            error "无法查询最新版本(来源:${SOURCE})。可能是网络问题或 API 限频。"
             info "方案1: 稍后重试"
-            info "方案2: 设置 GITHUB_TOKEN 环境变量提高 API 配额"
-            info "方案3: 用 --version v0.x.y 显式指定版本(跳过查询)"
+            info "方案2: 用 --version v0.x.y 显式指定版本(跳过查询)"
+            info "方案3: 切换来源重试(SOURCE=gitee 或 SOURCE=github)"
             exit 1
         fi
         VERSION=$(grep -m1 '"tag_name"' "$VERSION_FILE" | sed -E 's/.*"tag_name":[[:space:]]*"([^"]+)".*/\1/')
@@ -194,7 +217,7 @@ else
     EXT="tar.gz"
     [ "$OS" = "windows" ] && EXT="zip"
     ASSET="${BIN_NAME}_${VERSION_NO_V}_${OS}_${ARCH}.${EXT}"
-    URL="https://github.com/${OWNER}/${REPO}/releases/download/${VERSION}/${ASSET}"
+    URL="${DL_BASE}/${VERSION}/${ASSET}"
 
     TMPDIR=$(mktemp -d)
     trap 'rm -rf "$TMPDIR"' EXIT
@@ -202,13 +225,13 @@ else
     # --progress-bar:下载大文件时显示进度条(去掉 -s 的静默,保留 -S 让出错仍报错)
     if ! curl -fSL --progress-bar --connect-timeout 10 --max-time 120 "$URL" -o "$TMPDIR/$ASSET"; then
         error "下载失败。常见原因:版本号不存在,或该平台没出包。"
-        info "可在浏览器查看可用资产:https://github.com/${OWNER}/${REPO}/releases/tag/${VERSION}"
+        info "可在浏览器查看可用资产:${RELEASE_PAGE}/tag/${VERSION}"
         exit 1
     fi
     success "Downloaded: $(du -h "$TMPDIR/$ASSET" | awk '{print $1}')"
 
     # 校验和(可选,有的话比对)
-    if curl -fsSL "https://github.com/${OWNER}/${REPO}/releases/download/${VERSION}/checksums.txt" \
+    if curl -fsSL "${DL_BASE}/${VERSION}/checksums.txt" \
             -o "$TMPDIR/checksums.txt" 2>/dev/null; then
         info "Verifying checksum..."
         EXPECTED=$(grep " ${ASSET}\$" "$TMPDIR/checksums.txt" | awk '{print $1}')
@@ -267,6 +290,14 @@ else
     install -m 0755 "$BIN_SRC" "$BIN_DIR/$BIN_NAME"
     success "Installed: $BIN_DIR/$BIN_NAME"
 fi
+
+# ---------------------------------------------------------------------------
+# Step 5.5: 记录安装来源
+# `deepx upgrade` / 应用内升级检查据此决定回 GitHub 还是 Gitee(查版本 API + 重跑哪个源的脚本)。
+# 用独立的纯文本标记文件,免去在 shell 里合并 meta.json(没 jq 也能 echo 一行)。
+# ---------------------------------------------------------------------------
+mkdir -p "$HOME/.deepx"
+printf '%s\n' "$SOURCE" > "$HOME/.deepx/.upgrade_source"
 
 # ---------------------------------------------------------------------------
 # Step 6: PATH 配置 (改 shell rc)

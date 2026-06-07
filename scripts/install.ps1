@@ -18,7 +18,10 @@
 param(
     [string]$Version    = $env:DEEPX_VERSION,
     [string]$Prefix     = $env:DEEPX_PREFIX,
-    [switch]$FromSource = [bool]$env:DEEPX_FROM_SOURCE
+    [switch]$FromSource = [bool]$env:DEEPX_FROM_SOURCE,
+    # 下载来源 github(默认)/ gitee —— 国内用户用 gitee 加速:
+    #   $env:SOURCE='gitee'; irm .../install.ps1 | iex
+    [string]$Source     = $(if ($env:SOURCE) { $env:SOURCE } else { $env:DEEPX_SOURCE })
 )
 
 $ErrorActionPreference = 'Stop'
@@ -26,9 +29,30 @@ $ErrorActionPreference = 'Stop'
 # ---------------------------------------------------------------------------
 # 固定配置
 # ---------------------------------------------------------------------------
-$Owner   = 'itmisx'
-$Repo    = 'deepx-code'
+$Owner   = if ($env:DEEPX_OWNER) { $env:DEEPX_OWNER } else { 'itmisx' }
+$Repo    = if ($env:DEEPX_REPO)  { $env:DEEPX_REPO }  else { 'deepx-code' }
 $BinName = 'deepx.exe'
+
+if (-not $Source) { $Source = 'github' }
+switch ($Source) {
+    'github' {
+        $GitHost     = 'github.com'
+        $ReleaseApi  = "https://api.github.com/repos/$Owner/$Repo/releases/latest"
+        $DlBase      = "https://github.com/$Owner/$Repo/releases/download"
+        $ReleasePage = "https://github.com/$Owner/$Repo/releases"
+    }
+    'gitee' {
+        # Gitee 兼容 GitHub 的 release 下载 URL 格式;版本查询走 Gitee v5 OpenAPI。
+        $GitHost     = 'gitee.com'
+        $ReleaseApi  = "https://gitee.com/api/v5/repos/$Owner/$Repo/releases/latest"
+        $DlBase      = "https://gitee.com/$Owner/$Repo/releases/download"
+        $ReleasePage = "https://gitee.com/$Owner/$Repo/releases"
+    }
+    default {
+        Write-Host "[ERROR] Unknown SOURCE: $Source (用 github 或 gitee)" -ForegroundColor Red
+        exit 1
+    }
+}
 
 if (-not $Prefix) { $Prefix = Join-Path $env:LOCALAPPDATA 'Programs\deepx' }
 
@@ -47,7 +71,7 @@ function Write-Err     ($msg) { Write-Host "[ERROR] $msg" -ForegroundColor Red }
 Write-Host ""
 Write-Host "  +-----------------+" -ForegroundColor Cyan
 Write-Host "  |     deepx       |   终端里的 AI 代码助手" -ForegroundColor Cyan
-Write-Host "  +-----------------+   github.com/$Owner/$Repo" -ForegroundColor Cyan
+Write-Host "  +-----------------+   $GitHost/$Owner/$Repo" -ForegroundColor Cyan
 Write-Host ""
 
 # ---------------------------------------------------------------------------
@@ -94,7 +118,7 @@ if ($FromSource) {
     $tmp = New-Item -ItemType Directory -Path (Join-Path $env:TEMP "deepx-build-$([guid]::NewGuid().ToString('N'))") -Force
     try {
         Write-Info "Cloning $Owner/$Repo into $tmp..."
-        & git clone --depth=1 "https://github.com/$Owner/$Repo.git" (Join-Path $tmp $Repo) | Out-Null
+        & git clone --depth=1 "https://$GitHost/$Owner/$Repo.git" (Join-Path $tmp $Repo) | Out-Null
         Push-Location (Join-Path $tmp $Repo)
         try {
             Write-Info "Running go build..."
@@ -117,10 +141,10 @@ else {
     # ---------------------------------------------------------------------------
     Write-Step "Resolving version"
     if (-not $Version) {
-        Write-Info "Querying latest release from GitHub..."
+        Write-Info "Querying latest release from $Source..."
         try {
-            $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/$Owner/$Repo/releases/latest" `
-                                      -Headers @{ 'Accept' = 'application/vnd.github+json' } `
+            $rel = Invoke-RestMethod -Uri $ReleaseApi `
+                                      -Headers @{ 'Accept' = 'application/json' } `
                                       -UseBasicParsing
             $Version = $rel.tag_name
         } catch {
@@ -146,7 +170,7 @@ else {
     $versionNoV = $Version -replace '^v', ''
     $assetPrefix = $BinName -replace '\.exe$', ''
     $asset = "${assetPrefix}_${versionNoV}_windows_${Arch}.zip"
-    $url   = "https://github.com/$Owner/$Repo/releases/download/$Version/$asset"
+    $url   = "$DlBase/$Version/$asset"
     $tmp   = New-Item -ItemType Directory -Path (Join-Path $env:TEMP "deepx-install-$([guid]::NewGuid().ToString('N'))") -Force
     $zipPath = Join-Path $tmp $asset
     $sumsPath = Join-Path $tmp 'checksums.txt'
@@ -157,14 +181,14 @@ else {
             Invoke-WebRequest -Uri $url -OutFile $zipPath -UseBasicParsing
         } catch {
             Write-Err "下载失败: $($_.Exception.Message)"
-            Write-Info "在浏览器查看可用资产: https://github.com/$Owner/$Repo/releases/tag/$Version"
+            Write-Info "在浏览器查看可用资产: $ReleasePage/tag/$Version"
             exit 1
         }
         Write-Ok "Downloaded: $([math]::Round((Get-Item $zipPath).Length / 1MB, 2)) MB"
 
         # 校验 SHA256(可选,无则跳过)
         try {
-            Invoke-WebRequest -Uri "https://github.com/$Owner/$Repo/releases/download/$Version/checksums.txt" `
+            Invoke-WebRequest -Uri "$DlBase/$Version/checksums.txt" `
                               -OutFile $sumsPath -UseBasicParsing -ErrorAction Stop
             $expected = (Get-Content $sumsPath | Select-String -SimpleMatch " $asset" | Select-Object -First 1).Line `
                             -split '\s+' | Select-Object -First 1
@@ -207,6 +231,14 @@ else {
         Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
     }
 }
+
+# ---------------------------------------------------------------------------
+# Step 5.5: 记录安装来源
+# `deepx upgrade` / 应用内升级检查据此决定回 GitHub 还是 Gitee(查版本 API + 重跑哪个源的脚本)。
+# ---------------------------------------------------------------------------
+$deepxDir = Join-Path $env:USERPROFILE '.deepx'
+New-Item -ItemType Directory -Path $deepxDir -Force | Out-Null
+Set-Content -Path (Join-Path $deepxDir '.upgrade_source') -Value $Source -Encoding ascii -NoNewline
 
 # ---------------------------------------------------------------------------
 # Step 6: 持久化 PATH(User 级,不污染系统)
