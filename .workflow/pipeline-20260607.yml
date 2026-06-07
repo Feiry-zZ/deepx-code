@@ -45,10 +45,12 @@ stages:
         releaseName: "${RELEASE_TAG}"
         description: "deepx ${RELEASE_TAG}"
         tagName: "${RELEASE_TAG}"
-        # 拉上游 build 的制品(=整个 ./dist),整包挂到发行版;免列动态文件名
+        # 拉上游 build 的制品(=整个 ./dist)进工作目录
         upstreamArtifact:
           - BUILD_ARTIFACT
-        assertFiles: []
+        # assertFiles 指向下载下来的目录,整目录挂到发行版(插件支持 folder,免列动态文件名)
+        assertFiles:
+          - ./dist
         prerelease: false
         allowUpdate: true
         notify: []
