@@ -143,6 +143,8 @@ type Manager struct {
 	configs map[string]ServerConfig
 	// lastRestart 记录每个 server 上次重启时间戳,用于冷却防雪崩。
 	lastRestart map[string]time.Time
+	// refreshMu 串行化 refreshTools;独立于 m.mu,不阻塞 getClient 等操作。
+	refreshMu sync.Mutex
 }
 
 // NewManager 新建管理器(尚未连接)。
@@ -320,24 +322,46 @@ func (m *Manager) Status() []ServerStatus {
 // refreshTools 把所有已连接 server 的工具汇成 []tools.Tool 注入 tools 包。
 // 工具名 mcp__<server>__<tool>,Executor 闭包转发到对应 client。
 func (m *Manager) refreshTools() {
+	// refreshMu 串行化并发 refresh;独立于 m.mu,不阻塞 getClient 等操作。
+	m.refreshMu.Lock()
+	defer m.refreshMu.Unlock()
+
+	// 快照 client 指针后立即释放 m.mu;ListTools 是阻塞网络调用,不应持 m.mu。
 	m.mu.Lock()
+	snapshot := make(map[string]*Client, len(m.clients))
+	for name, c := range m.clients {
+		snapshot[name] = c
+	}
+	m.mu.Unlock()
+
 	type entry struct {
 		client *Client
 		server string
 		defs   []ToolDef
 	}
 	var entries []entry
-	for name, c := range m.clients {
+	for name, c := range snapshot {
 		defs, err := c.ListTools()
 		if err != nil {
 			continue
 		}
 		entries = append(entries, entry{c, name, defs})
 	}
+
+	// 发布前重新校验:snapshot 中的 client 可能已被 Disconnect 移除。
+	// 只发布仍在 m.clients 中且指针未变的 entry。
+	m.mu.Lock()
+	current := make(map[string]*Client, len(m.clients))
+	for name, c := range m.clients {
+		current[name] = c
+	}
 	m.mu.Unlock()
 
 	var out []tools.Tool
 	for _, e := range entries {
+		if current[e.server] != e.client {
+			continue
+		}
 		for _, d := range e.defs {
 			server := e.server
 			toolName := d.Name
